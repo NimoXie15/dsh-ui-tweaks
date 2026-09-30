@@ -1,0 +1,60 @@
+{
+  "name": "@nimoxie/dsh-ui-tweaks",
+  "version": "0.1.0",
+  "description": "dsh Web UI 微调合集：宽表格越界修复、对话区左侧自绘滚动条、插件更新检查面板（不含 dsh 本体）",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "DEVELOPING.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "ui",
+    "scrollbar",
+    "table",
+    "plugin-updates",
+    "reduced-motion"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "NimoXie",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NimoXie15/dsh-ui-tweaks.git"
+  },
+  "homepage": "https://github.com/NimoXie15/dsh-ui-tweaks#readme",
+  "bugs": {
+    "url": "https://github.com/NimoXie15/dsh-ui-tweaks/issues"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}

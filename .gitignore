@@ -1,0 +1,16 @@
+# Node
+node_modules/
+*.log
+.DS_Store
+
+# pack / build artifacts (uncomment when you add a build step)
+# lib/*.map
+# dist/
+# coverage/
+
+# local
+*.tmp
+
+# npm credentials — never commit a token
+.npmrc
+*.tgz

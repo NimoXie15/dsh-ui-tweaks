@@ -1,0 +1,7 @@
+# dsh-ui-tweaks bundle patch: one host row over the web profile.
+# The row name resolves from the profile's own node_modules where
+# `dsh plugin --profile web add <path>` installed this package.
+# Scoped 包名的 name 必须写全（同 @linxin666 系插件），loader 按它解析 node_modules。
+- insert:
+    - id: ui-tweaks
+      name: '@nimoxie/dsh-ui-tweaks'
