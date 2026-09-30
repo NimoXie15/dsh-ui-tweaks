@@ -1,6 +1,6 @@
 {
   "name": "@nimoxie/dsh-ui-tweaks",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "dsh Web UI 微调合集：宽表格越界修复、对话区左侧自绘滚动条、插件更新检查面板（不含 dsh 本体）",
   "type": "module",
   "main": "lib/index.js",
