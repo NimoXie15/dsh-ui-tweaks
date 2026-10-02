@@ -49,7 +49,8 @@
 - **registry 比对在浏览器直连**：`registry.npmjs.org` 带 CORS *（实测），逐包**串行** fetch `/latest`，不打并发。
 - **装完必须回读实际版本**：回读**只用 `pluginManager.listBundles()`**——`pluginInventory` 只有 `list()` 没有 `listBundles`，先取它掉进「回读版本失败」假阳性（踩过）；装完瞬间清单可能短暂不可用，重试 3 次（1.5s 间隔）再下结论。重试后仍读不到就直接 mark「已发起·未确认」（可点重查）。
 - **更新严格串行**：pnpm 对 profile 的 package.json 有文件锁，并发发起不会真并行、只会排队。队列顶项标「等待更新」，正在装的标「更新中 …」，两者都可点取消。
-- `waitForInstall` 的返回形态官方页面之外没有文档，本插件对 `phase/state/status/ok` 多形状都认、240 秒兜底超时；真实跑通后按实际返回收紧。
+- **总看门狗（0.1.3）**：`startOne` 入口起 240s 定时器，`finish` 里 `clearTimeout`——覆盖 fetchLatest（现场查 registry，fetch 本身无超时）与 specPromise（原先无 catch）这两段不设防的异步；超时先 `finish(false, "更新超时…")` 再 `cancelInstall(busyReq)`。
+- **`waitForInstall` 的返回形态已实测收紧（0.1.3，从 app.asar 的 zod schema 解出）**：终态读 `application`（`applied` / `restart-required` / `failed` / `cancelled` / `overridden`），进行中读 `stage`（`remove` / `install` / `enable`，行内 why 显示「阶段：…」），失败定位读 `failedAt`（`registry` / `spec-host`）。原先按 `phase/state/status/ok` 猜的形状全都不存在——那正是更新中无限挂起的原因：终态永远匹配不上，且更早的 fetchLatest/specPromise 两段异步在 240s 兜底之前就不设防。
 
 ## 动画修复（模块 4）
 
@@ -72,7 +73,8 @@
 - [ ] 有更新时按钮加角标（现在要点开面板才看得到）。
 - [ ] i18n（`ctx.locale.register(NS, {zh, en})`，照 dsh-model-organizer 写法）。
 - [ ] 会话内重启 dsh 的入口（需要 host 配合或官方重启 API，未调研）。
-- [ ] `waitForInstall` 终态按实测收紧；`installBundle` 的 `registry` 参数补齐。
+- [x] 0.1.3：`waitForInstall` 终态已按实测收紧（application/stage/failedAt）+ 全程总看门狗。
+- [ ] `installBundle` 的 `registry` 参数补齐（官方传了，本插件省略）。
 - [ ] 插件被禁用/卸载时的运行时清理（目前 DOM 残留到页面刷新为止）。
 
 ## 发布
