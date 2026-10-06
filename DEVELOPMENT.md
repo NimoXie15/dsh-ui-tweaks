@@ -45,12 +45,18 @@
 
 ### 其它要点
 
-- **更新主路径全部走官方 remote API**（host 半区只挂一条本地包识别路由）：`pluginManager.listBundles()`（清单+版本）、`installBundle("<名>@版本", { enabled: true, requestId })`（更新）、`waitForInstall(requestId)`（进度）、`cancelInstall(requestId)`（取消）。`installBundle` 的第二参官方还传了 `registry`（来自 `pluginManager.registries()`），本插件省略——若某天报 registry 缺失，先补它。
-- **registry 比对在浏览器直连**：`registry.npmjs.org` 带 CORS *（实测），逐包**串行** fetch `/latest`，不打并发。
-- **装完必须回读实际版本**：回读**只用 `pluginManager.listBundles()`**——`pluginInventory` 只有 `list()` 没有 `listBundles`，先取它掉进「回读版本失败」假阳性（踩过）；装完瞬间清单可能短暂不可用，重试 3 次（1.5s 间隔）再下结论。重试后仍读不到就直接 mark「已发起·未确认」（可点重查）。
-- **更新严格串行**：pnpm 对 profile 的 package.json 有文件锁，并发发起不会真并行、只会排队。队列顶项标「等待更新」，正在装的标「更新中 …」，两者都可点取消。
-- **总看门狗（0.1.3）**：`startOne` 入口起 240s 定时器，`finish` 里 `clearTimeout`——覆盖 fetchLatest（现场查 registry，fetch 本身无超时）与 specPromise（原先无 catch）这两段不设防的异步；超时先 `finish(false, "更新超时…")` 再 `cancelInstall(busyReq)`。
-- **`waitForInstall` 的返回形态已实测收紧（0.1.3，从 app.asar 的 zod schema 解出）**：终态读 `application`（`applied` / `restart-required` / `failed` / `cancelled` / `overridden`），进行中读 `stage`（`remove` / `install` / `enable`，行内 why 显示「阶段：…」），失败定位读 `failedAt`（`registry` / `spec-host`）。原先按 `phase/state/status/ok` 猜的形状全都不存在——那正是更新中无限挂起的原因：终态永远匹配不上，且更早的 fetchLatest/specPromise 两段异步在 240s 兜底之前就不设防。
+- **更新主路径全部走官方 remote API**（host 半区只挂一条本地包识别路由）：`pluginManager.listBundles()`（清单+版本）、`installBundle("<名>@版本", { enabled, requestId })`（更新）、`waitForInstall(requestId)`（**仅**响应丢失后的恢复）、`cancelInstall(requestId)`（取消，回 `{status}`）。
+- **`installBundle` 是「等到装完才返回」的调用，它的返回值就是终态**（0.1.4 的关键纠正）：remote 信封是 `{ok, value}`，`value` 即 `{changed, application, stage, target, enabled?, error?, warnings?, packageResult?, bundle?, pendingBuilds?, approvedBuilds?, registries?, failedAt?}`。官方桌面端插件页也是 `await installBundle(...)` 之后直接 `settleInstall(result.value)`。
+- **`waitForInstall` 不是进度轮询器**（**0.1.3 的理解是错的，那正是「更新永远超时」的真因**）：它只用于**响应丢失后**恢复同一请求的结果，请求不在活动中时返回 `null`，而且**已完成的结果不保留**。`installBundle` 已经 await 到装完，此时再轮询 `waitForInstall` 必然一路读到 `null` → 空转到 240s 看门狗 → 面板报「更新超时」，真实结果（成功或 pnpm 报错）全被丢掉。0.1.4 起：正常路径只读 `res.value`；**仅当信封本身失败（`res.ok === false`，结果未知）**才调一次 `waitForInstall` 恢复，仍为 `null` 就如实报「已发起·未确认」。
+- **终态判定读 `application`**：`applied` / `restart-required`（都算成功，后者提示重启）→ 回读版本核对；`cancelled` → 该行退回「有新版本」（取消不是失败，仍可重试）；`failed` → 行标「更新失败」，并把 `error.code`（译成中文）+ `error.diagnostic` + `packageResult.kind/exitCode/output/logPath` + `pendingBuilds` + `failedAt` 一起写进行内 `why`；`overridden` → 提示被覆盖、可重试；未知值一律按「结果未知」处理，不硬判成功。
+- **回读版本是唯一成功判据**：只有在 `listBundles()` 里读到该行版本、且**与安装前不同**时才判「已是最新」。回读**只用 `pluginManager.listBundles()`**——`pluginInventory` 只有 `list()` 没有 `listBundles`（踩过，会造成「回读版本失败」假阳性）；装完瞬间清单可能短暂不可用，重试 3 次（1.5s 间隔）。比对基准 `busyBefore` 在 `startOne` 抓取，**不受中途「重新检查」重建行的影响**。
+- **registry 比对在浏览器直连**：`registry.npmjs.org` 带 CORS *（实测），逐包**串行** fetch `/latest`，不打并发。代价要知道：比对源是 npmjs，而安装走 pnpm 自己的 registry（本机 `.npmrc` 指向 npmmirror）——镜像尚未同步到的新版本会「面板说有、装时报 no-matching-version」（见「待办」）。
+- **取消要分清对象**（0.1.4 修）：排队项点取消只把它自己摘出队列（`cancelQueued`）；在装项点取消才 `cancelInstall(requestId)`，且**保留队列**，等这次落定后 `done() → pump()` 接着装下一项。旧实现 `requestCancel` 里一句 `queue = []` 把整个队列清空，于是「等待更新」的项全部退回「有新版本」不再开始——这就是「取消一项后，等待的项不更新、反而变回有新版本」的真因。`cancelInstall` 的回值 `{status: cancelled|not-running|too-late}` 也要读：`too-late` 说明已进入应用阶段、取消不掉，得如实告诉用户。
+- **重新检查必须回填在飞状态**（0.1.4 修）：`checkNow` 重建 `rows` 会把「更新中/等待更新」抹成「有新版本」，而 `busyName`/`queue` 仍在——此时点那一行会撞上 `enqueue` 的 `name === busyName` 保护而**静默无反应**（这就是「重新检查后无法更新」的真因），真正在装的那一项也失去取消入口。修法是重建行后立刻 `reconcileInstallStates()` 把 busy/queuing 盖回去，且这两种行不参与 registry 比对。
+- **总看门狗（0.1.4 起只是兜底）**：正常路径一次 `installBundle` 就定案，不必再等 240s；看门狗只覆盖 fetchLatest（现场查 registry，fetch 无超时）这类异常分支，触发时报「结果未知」并 `cancelInstall`。
+- **`enabled` 用清单里的真实状态**：`installBundle` 的 `enabled` 传 `!(row.enabled === false)`，保留用户手动禁用的选择（旧实现一律 `enabled: true`，会把禁用的插件重新启用）。
+- **失败原因要可见**：`fail` / `unchanged` / `unconfirmed` / `error` 行在行下多渲染一行 `.why`——只放在 `title` 悬停提示里，等于 pnpm 的报错没显示。
+
 
 ## 动画修复（模块 4）
 
@@ -73,7 +79,11 @@
 - [ ] 有更新时按钮加角标（现在要点开面板才看得到）。
 - [ ] i18n（`ctx.locale.register(NS, {zh, en})`，照 dsh-model-organizer 写法）。
 - [ ] 会话内重启 dsh 的入口（需要 host 配合或官方重启 API，未调研）。
-- [x] 0.1.3：`waitForInstall` 终态已按实测收紧（application/stage/failedAt）+ 全程总看门狗。
+- [x] 0.1.3：`waitForInstall` 终态按 zod schema 收紧了字段名（`application`/`stage`/`failedAt`）+ 全程总看门狗。**注意：这一版的结论是错的**——字段名猜对了，但把 `waitForInstall` 当进度轮询器用，而它只做「响应丢失恢复」；见 0.1.4 条目。
+- [x] 0.1.4：终态改读 `installBundle().value`（`waitForInstall` 只在信封失败时兜一次）；取消不再清空队列、排队项可单独取消；`checkNow` 回填 busy/queuing；失败原因（`error`/`packageResult`/`pendingBuilds`）落到面板；`enabled` 沿用清单里的真实状态。
+- [ ] 比对 registry 与安装 registry 对齐：面板查 `registry.npmjs.org`，pnpm 走 `.npmrc`（npmmirror）。镜像未同步的新版本会造成「面板说有新版、装时报 no-matching-version」。可用 `pluginManager.registries()` 取实际 registry 再比对（需先确认镜像的 CORS）。
+- [ ] `pendingBuilds` 的「允许这些脚本并重试」入口（`installBundle(spec, { approvedBuilds })`）。现在只在失败行里列出待授权名单。
+- [ ] `removable === false` / `optional` / 带 `readOnlyReason` 的 bundle 在面板隐藏或标注——否则点了会以 `management-required` 失败。
 - [ ] `installBundle` 的 `registry` 参数补齐（官方传了，本插件省略）。
 - [ ] 插件被禁用/卸载时的运行时清理（目前 DOM 残留到页面刷新为止）。
 

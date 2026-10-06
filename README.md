@@ -56,6 +56,8 @@ dsh plugin --profile <profile> add link:/absolute/path/to/dsh-ui-tweaks
 - 非 npm 来源的插件没有可比的 registry 版本，直接跳过比对：`link:` / `file:` 本地路径标「本地链接」；`git:` / `github:` / `http` 直装标「Git 直装」（例如 `github:Fisfzy/dsh-ego-browser` 会显示为 Git 直装，即使 npm 上有同名包，装的也是仓库源码、与 npm 版本不是一回事）
 - `@deepseek-ai` 官方插件直接从检查列表里剔除：它们的更新由 dsh 本体流程负责
 - 更新走 profile 内的插件安装接口，与官方插件管理页同源；安装按 registry 解析出的**精确版本号**发起（而非 `@latest`），不受 pnpm 发布时长策略（minimumReleaseAge）拦挡，刚发布的版本也能装
+- 更新失败时行内会直接给出原因（pnpm 的输出、退出码与日志路径），不再只说一句「失败」；失败行可点击重试。取消只作用于你点的那一项：取消排队的项不影响正在装的，取消正在装的也不会丢掉后面排队的（它会自动接着装）
+- 面板比对用的是 npm 官方 registry，而安装走你本机 pnpm 配置的源（如 npmmirror 镜像）。镜像尚未同步到的新版本会出现「面板说有新版、装时报找不到版本」，稍后镜像同步后重试即可
 - 个别插件（如社区插件管理页扩展）自带单独的「检查更新」入口，与本插件的检查互不关联，结果可能不同
 - 与启动器 dsh-web-shell 的分工：对话区滚动条、宽表格修复等界面增强已由本插件接管，dsh-web-shell 自身不再注入；其「检查更新」按钮仍负责 **dsh 本体**的比对与升级提示
 
@@ -65,4 +67,4 @@ MIT
 
 ---
 
-想自己改这个插件、或者想了解它在内部怎么实现的，见 [DEVELOPING.md](./DEVELOPING.md)。
+想自己改这个插件、或者想了解它在内部怎么实现的，见 [DEVELOPMENT.md](./DEVELOPMENT.md)。
