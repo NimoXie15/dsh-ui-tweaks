@@ -39,6 +39,8 @@
 - **豁免表的坑（0.1.5 实测）**：`minimumReleaseAgeExclude` 里同一个包名出现**多条**时**只有文件中靠前的那条生效**（不是并集）。同一份 lockfile/yaml 只改顺序：`[pkg@0.69.0, pkg@0.61.0]` 通过、`[pkg@0.61.0, pkg@0.69.0]` 失败。于是陈旧条目**静默遮蔽**新条目，此后每次安装都被门禁拦下；而一次成功的未成熟安装又会把新条目**追加在末尾**，让旧条重新变成靠前那条 → 下一次安装立刻失败。**这就是 0.1.5 之前用户侧「更新某插件 → 报一长串 pnpm 错误 → 之后所有插件都装不上」的真因。**
 - **对策（0.1.5）**：host 半区新增归并器 `normalizeReleaseAgeExcludes()`（`lib/index.js`），把该表收敛成「每包一条」——同包多条只留"与 lockfile 锁定版本一致"的那条（否则留靠前那条）；受管包名（profile `dependencies` 里的）唯一条且版本 ≠ 锁定版本 → 删除；非受管且不重复的条目不动。结果恒为原条目的**子集**（绝不比现状更宽松）。触发：插件加载时静默一次 + `POST /api/ui-tweaks/normalize-excludes`（client 在安装落地成功后与「重新检查」时 fire-and-forget 调用）。安全约束：只改 `minimumReleaseAgeExclude` 这一段、其余字节逐字节保留；写前留 `pnpm-workspace.yaml.bak-<时间戳>`；同目录临时文件 + `renameSync` 原子替换；写后重读校验；无变化不写盘；幂等；异常一律不外抛。
 - **客户端「冷静期中」(cooling)**：两条判定路——① 预判：拉该包**全量 packument** 读 `time[版本]`（`/<pkg>/latest` 与 abbreviated packument 都**没有** `time`，实测），`发布时间 + 窗口 > 现在` 即标 cooling；② 反应式：门禁报错里同时有 `published at <ISO>` 与 `cutoff <ISO>`，于是 `窗口 = now − cutoff`、`成熟时刻 = 发布 + 窗口`（前提是刚失败就解析，秒级误差）。反推窗口只接受 (0, 30 天]，越界退回会话默认值（真实值会从首次报错学到）。cooling 标签**不可点击安装**（点它必然撞门禁、还可能连累整个 profile），只切换详情；`enqueue` 里还有第二道闸。
+- **cooling 副标题（0.1.6 改写）**：原来一句话里塞了「供应链冷静期 / minimumReleaseAge / 门禁 / profile」四个未解释术语，末句还是「不是本插件的问题」这种防御性措辞。现在固定三层：①结论与时间（`还需等待 11 小时 1 分才能更新（10-15 08:07 到期，到点这一行会自动变回可更新）`）→ ②为什么有这段等待（把 dsh 的 24 小时策略讲成人话）→ ③现在硬装的后果（连坐整个 profile，故不提供直接安装）；等待期已过/结束时间未知各有专门文案（已过期时不再说"会被拦下"，避免自相矛盾）。换行由 `.why` 的 `white-space:pre-wrap` 呈现。
+- **到期自动重查（0.1.6）**：`scheduleCoolingRefresh(name, matureAt)` 给 cooling 行排一个到点（+3s 缓冲）的 `checkOne(name)` 定时器，按包名去重（重复预判/重查只留最后一个）；触发点＝`applyCoolingGuess` 预判落 cooling 后、`judge` 的冷却分支落 cooling 后。超时上限（约 24.8 天）之外不排。这样用户不必记时间，到点自动变回「有新版本」。
 - **本机实测环境**：dsh 用的是**自带的 pnpm 11.7.0**（`<DSH_HOME>/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm`），**不是** PATH 上那个（本机 PATH 是 11.21.0）。排查这类问题必须用前者复现，否则结论会反过来。
 - 参考实现：社区分叉版 `@linxin666/dsh-client-ui-plugin-manager` 的 update handler 也是先 `fetchManifest` 拿 registry 的 `version`，再 `installBundle(name@version)`——它「能更新」不是因为绕过了门禁，而是因为它用的是精确版本（只绕开第 2 条路径）。
 
@@ -103,6 +105,10 @@
 - [x] 0.1.3：`waitForInstall` 终态按 zod schema 收紧了字段名（`application`/`stage`/`failedAt`）+ 全程总看门狗。**注意：这一版的结论是错的**——字段名猜对了，但把 `waitForInstall` 当进度轮询器用，而它只做「响应丢失恢复」；见 0.1.4 条目。
 - [x] 0.1.4：终态改读 `installBundle().value`（`waitForInstall` 只在信封失败时兜一次）；取消不再清空队列、排队项可单独取消；`checkNow` 回填 busy/queuing；失败原因（`error`/`packageResult`/`pendingBuilds`）落到面板；`enabled` 沿用清单里的真实状态。
 - [x] 0.1.5：新增「冷静期中」(cooling)——预判（全量 packument 的 `time`）+ 报错反推成熟时刻，标签不可点击安装、`enqueue` 二次拦截；host 半区新增 `minimumReleaseAgeExclude` 归并器与 `POST /api/ui-tweaks/normalize-excludes`（安装成功/重新检查时 fire-and-forget）；失败文案剥 ANSI、同一份 pnpm 输出去重、cooling 详情折叠；纠正 0.1.4 关于 `minimumReleaseAge` 的半个结论。
+- [x] 0.1.6：桌面客户端窗口记忆（预编译 DLL + PowerShell helper）；更新落地后头部常驻「重启生效」提示条；cooling 副标题改三层文案 + 到期自动重查；归并器/窗口 helper 的两个实测 bug 修复（最小化窗口断线跟踪、归位改「隐藏→移动→显示」）。
+- [ ] cooling 的「强制更新（跳过 minimumReleaseAge）」：**技术上可行**（精确版本 spec 会让 pnpm 自动写豁免表；host 半区本来就有写 `pnpm-workspace.yaml` 的能力），但门禁校验的是**整个 lockfile**，所以必须先做成熟度预检（列出其它会被拦下的包）+ 交互上要显式二次确认 + 动手前用自带 pnpm 11.7.0 真机验证一次强制路径。**待与用户确认是否要做。**
+- [ ] 窗口记忆「零闪现」：唯一途径是常驻 watcher 进程（不属于 dsh 运行时、跨客户端重启存活、守在客户端启动前归位）；代价是后台常驻进程 + 卸载后残留需自清理。**待与用户确认是否接受这个代价。**
+- [ ] cooling 预检（lockfile 成熟度扫描）：为「这次安装会不会被门禁拦下、被谁拦下」提供提前诊断；需拉 N 个包的发布时间，有耗时/缓存设计问题，建议与上面「强制更新」一起做。
 - [ ] 比对 registry 与安装 registry 对齐：面板查 `registry.npmjs.org`，pnpm 走 `.npmrc`（npmmirror）。镜像未同步的新版本会造成「面板说有新版、装时报 no-matching-version」。可用 `pluginManager.registries()` 取实际 registry 再比对（需先确认镜像的 CORS）。
 - [ ] `pendingBuilds` 的「允许这些脚本并重试」入口（`installBundle(spec, { approvedBuilds })`）。现在只在失败行里列出待授权名单。
 - [ ] `removable === false` / `optional` / 带 `readOnlyReason` 的 bundle 在面板隐藏或标注——否则点了会以 `management-required` 失败。
