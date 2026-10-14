@@ -38,7 +38,8 @@
   2. **解析（在门禁之后）**：候选不合法时 pnpm 会挑「最新合法版本」（于是装上后版本没变 → 面板判「暂缓」）；但**显式写 `name@版本`** 时它会打印 `Added 1 entry to minimumReleaseAgeExclude in pnpm-workspace.yaml` 并照常安装——这条仍然成立，只是它管不了第 1 条。
 - **豁免表的坑（0.1.5 实测）**：`minimumReleaseAgeExclude` 里同一个包名出现**多条**时**只有文件中靠前的那条生效**（不是并集）。同一份 lockfile/yaml 只改顺序：`[pkg@0.69.0, pkg@0.61.0]` 通过、`[pkg@0.61.0, pkg@0.69.0]` 失败。于是陈旧条目**静默遮蔽**新条目，此后每次安装都被门禁拦下；而一次成功的未成熟安装又会把新条目**追加在末尾**，让旧条重新变成靠前那条 → 下一次安装立刻失败。**这就是 0.1.5 之前用户侧「更新某插件 → 报一长串 pnpm 错误 → 之后所有插件都装不上」的真因。**
 - **对策（0.1.5）**：host 半区新增归并器 `normalizeReleaseAgeExcludes()`（`lib/index.js`），把该表收敛成「每包一条」——同包多条只留"与 lockfile 锁定版本一致"的那条（否则留靠前那条）；受管包名（profile `dependencies` 里的）唯一条且版本 ≠ 锁定版本 → 删除；非受管且不重复的条目不动。结果恒为原条目的**子集**（绝不比现状更宽松）。触发：插件加载时静默一次 + `POST /api/ui-tweaks/normalize-excludes`（client 在安装落地成功后与「重新检查」时 fire-and-forget 调用）。安全约束：只改 `minimumReleaseAgeExclude` 这一段、其余字节逐字节保留；写前留 `pnpm-workspace.yaml.bak-<时间戳>`；同目录临时文件 + `renameSync` 原子替换；写后重读校验；无变化不写盘；幂等；异常一律不外抛。
-- **客户端「冷静期中」(cooling)**：两条判定路——① 预判：拉该包**全量 packument** 读 `time[版本]`（`/<pkg>/latest` 与 abbreviated packument 都**没有** `time`，实测），`发布时间 + 窗口 > 现在` 即标 cooling；② 反应式：门禁报错里同时有 `published at <ISO>` 与 `cutoff <ISO>`，于是 `窗口 = now − cutoff`、`成熟时刻 = 发布 + 窗口`（前提是刚失败就解析，秒级误差）。反推窗口只接受 (0, 30 天]，越界退回会话默认值（真实值会从首次报错学到）。cooling 标签**不可点击安装**（只切换详情）；`enqueue` 里还有第二道闸，只有强制流程带 `force` 能过。
+- **成熟期硬闸（0.1.6，装前校验）**：光靠行状态拦不住点不点得动 —— 实测（用户撞到）：预判还在飞（要拉全量 packument，慢）时那一行还是可点的「有新版本」，点下去 `startOne` 用精确版本 spec，而精确版本会被 pnpm 自动写进豁免表并照常安装 → **未成熟版本被静默装了进去，没有任何确认**，与强制流程的设计意图正好相反。现在 `startOne` 在 `installBundle` 之前调 `guardMaturity(名字, 目标版本, 放行回调)`：未成熟且非强制 → 不装，落回 cooling（回填成熟时刻 + 技术细节 + 排自动重查）并清空 busy 状态；强制流程写 `forcedNames[name]`（一次性凭据，用后即删、`done()` 终态也清）。判定表（隔离测试 10/10）：未成熟且非强制＝拦；有凭据＝放行并消费；已成熟＝放行；registry 没给该版本发布时间＝放行；packument 查询失败＝放行；目标版本未知（`@latest` 兜底路径）＝放行。后三条是**刻意**的：数据源不可用时不该挡住正常更新（宁可漏拦、不误伤），要守的是「窗口内明确可判定时拦住」。
+- **客户端「冷静期中」(cooling)**：两条判定路——① 预判：拉该包**全量 packument** 读 `time[版本]`（`/<pkg>/latest` 与 abbreviated packument 都**没有** `time`，实测），`发布时间 + 窗口 > 现在` 即标 cooling；② 反应式：门禁报错里同时有 `published at <ISO>` 与 `cutoff <ISO>`，于是 `窗口 = now − cutoff`、`成熟时刻 = 发布 + 窗口`（前提是刚失败就解析，秒级误差）。反推窗口只接受 (0, 30 天]，越界退回会话默认值（真实值会从首次报错学到）。cooling 标签**不可点击安装**（只切换详情）；`enqueue` 里还有第二道闸，只有强制流程带 `force` 能过，装前还有第三道闸见上。
 - **强制更新（0.1.6，跳过冷静期）**：真机实测（自带 pnpm 11.7.0，用客户端自己的 Electron 以 `ELECTRON_RUN_AS_NODE=1` 跑 `pnpm.cjs`，隔离临时工程，样本＝发布 4 小时的 `undici@8.12.1`）：
   1. **精确版本 spec 装未成熟版本 → 成功**：pnpm 打印 `Added 1 entry to minimumReleaseAgeExclude in pnpm-workspace.yaml` 并自行写入豁免表。→ 0.1.5 里「写精确版本也救不了」只对**无污染 lockfile** 成立。
   2. **豁免表为空 + lockfile 含未成熟条目**：跑 `install`（无事可做）→ 开头校验、整体失败、**磁盘零改动**；**但若安装有活要干，安装照常落地、门禁在结尾才报错 exit 1**（实测 T2b/T3c）。→ 强制流程必须**先预检、拒绝在动手之前**；"先试一下看报什么错"会把 profile 留在「装上了但命令报错」的混乱态。
@@ -95,6 +96,17 @@
 - 文件落点：`<desktop profile>/ui-tweaks/{window-helper.cs, window-helper.dll, window-helper.ps1, window-helper.lock, window-state.json, window-helper.log}`（日志超 96KB 自动截尾）。删 `window-state.json` = 重置记忆。
 
 
+## 界面/布局改动的验证手法（0.1.6 起）
+
+面板是 Shadow DOM + 运行时拼字符串，肉眼看不出「差了几个像素」，靠猜会来回改。有效做法是**量出来**：
+
+1. **抽真实 CSS**：求值 `lib/client.js` 里 `sr.innerHTML = "<style>" + …` 那整段表达式，再从结果 HTML 里切出 `<style>` 内容。注意文件里有多处 shadow 样式块（滚动条等），要挑含 `.wrap{position:fixed` 的那个。
+2. **复刻 markup**：用真实 CSS + 按 `paint()` 的输出结构手写一段面板 markup，页面里用 `getBoundingClientRect()` 算出各项间距，`fetch("/report")` POST 回本地 Node 服务。
+3. **Edge 无头打开**：`msedge --headless=new --disable-gpu --user-data-dir=<每次唯一> http://127.0.0.1:<port>/`。两个坑：① 同一个 user-data-dir 会「移交」给仍在运行的旧实例、导致页面根本不给加载（必须每次唯一，并先清掉残留进程）；② 这个 Edge 上 `--dump-dom` 不输出，所以让页面自己把结果 POST 回来，别指望 stdout。
+4. `.why` 是 `white-space:pre-wrap`：测量页里美化的换行/缩进会被当成空白行渲染，内部 HTML 必须紧凑拼接，否则垂直数值全是假的（第一版就被这个骗过：`dtl_border_to_text` 量出 42px，真实是 6px）。
+
+0.1.6 用它抓到一个真 bug：上一版遗留的重复规则 `.fbtn{margin:8px 8px 0 0}` 与新增规则并存，让强制按钮比状态标签多出 8px 右内缩（实测 36 vs 28）；删掉后两者都是 13px、文字到按钮 8px（行盒 16px）。
+
 ## 从 dsh-web-shell 迁移的功能
 
 对话区左侧滚动条与宽表格修复原是 dsh-web-shell 的 CDP 注入脚本，已整体迁入本插件（client bundle 自由 JS），dsh-web-shell 自身删除了对应代码与 `leftScrollbar` / `tableWidthFix` 配置。此处不重复实现细节（`lib/client.js` 各模块注释里保留：宿主挂 body 的理由、composerSeat 裁剪 −4px、拖动三层防御、零位移 wheel 事件解阅读锚点、出血布局三件套），只记两条迁移后才知道的知识：
@@ -111,8 +123,7 @@
 - [x] 0.1.3：`waitForInstall` 终态按 zod schema 收紧了字段名（`application`/`stage`/`failedAt`）+ 全程总看门狗。**注意：这一版的结论是错的**——字段名猜对了，但把 `waitForInstall` 当进度轮询器用，而它只做「响应丢失恢复」；见 0.1.4 条目。
 - [x] 0.1.4：终态改读 `installBundle().value`（`waitForInstall` 只在信封失败时兜一次）；取消不再清空队列、排队项可单独取消；`checkNow` 回填 busy/queuing；失败原因（`error`/`packageResult`/`pendingBuilds`）落到面板；`enabled` 沿用清单里的真实状态。
 - [x] 0.1.5：新增「冷静期中」(cooling)——预判（全量 packument 的 `time`）+ 报错反推成熟时刻，标签不可点击安装、`enqueue` 二次拦截；host 半区新增 `minimumReleaseAgeExclude` 归并器与 `POST /api/ui-tweaks/normalize-excludes`（安装成功/重新检查时 fire-and-forget）；失败文案剥 ANSI、同一份 pnpm 输出去重、cooling 详情折叠；纠正 0.1.4 关于 `minimumReleaseAge` 的半个结论。
-- [x] 0.1.6：桌面客户端窗口记忆（预编译 DLL + PowerShell helper）；更新落地后头部常驻「重启生效」提示条；cooling 行默认一句话（`…才能更新（10-15 07:54 到期，点标签看详情）`）、完整解释与原始诊断收进点标签才展开的详情；cooling 到期自动重查；**强制更新（跳过冷静期）**——预检拦路者（拒绝并列出）+ 二次确认 + host 写生效豁免，真机实测把两条路径的语义钉死；归并器/窗口 helper 的两个实测 bug 修复（最小化窗口断线跟踪、归位改「隐藏→移动→显示」）。
-- [x] 0.1.6 已做：cooling 的「强制更新（跳过 minimumReleaseAge）」——host 两条回环路由（预检 + 写生效豁免）、客户端三段式交互、`enqueue(name,{force:true})` 唯一放行口；预检发现别的包也会被拦时**直接拒绝并列出**（按用户选定）。
+- [x] 0.1.6：桌面客户端窗口记忆（预编译 DLL + PowerShell helper）；更新落地后头部常驻「重启生效」提示条；cooling 行默认一句话（`…才能更新（10-15 07:54 到期，点标签看详情）`）、完整解释与原始诊断收进点标签才展开的详情；cooling 到期自动重查；**强制更新（跳过冷静期）**——host 两条回环路由（预检 + 写生效豁免）、客户端三段式交互、`enqueue(name,{force:true})` 放行；预检发现别的包也会被拦时**直接拒绝并列出**；**装前成熟期硬闸**（`guardMaturity`，堵住「预判未返回时点『有新版本』可静默装未成熟版本」的漏，判定表隔离测试 10/10）；归并器/窗口 helper 的两个实测 bug 修复（最小化窗口断线跟踪、归位改「隐藏→移动→显示」）。
 - [ ] 窗口记忆「零闪现」：唯一途径是常驻 watcher 进程（不属于 dsh 运行时、跨客户端重启存活、守在客户端启动前归位）；代价是后台常驻进程 + 卸载后残留需自清理。**待与用户确认是否接受这个代价**（用户倾向先继续讨论更优方案）。
 - [ ] cooling 预检可以更准：现在只扫直连依赖（importers 段）；传递依赖里若混进未成熟条目，只能靠安装失败时的反应式报错点名。若要覆盖全量 lockfile，得为几百个条目查发布时间（需要更狠的缓存/批量策略，或找 registry 的批量接口）。
 - [ ] cooling 预检（lockfile 成熟度扫描）：为「这次安装会不会被门禁拦下、被谁拦下」提供提前诊断；需拉 N 个包的发布时间，有耗时/缓存设计问题，建议与上面「强制更新」一起做。
