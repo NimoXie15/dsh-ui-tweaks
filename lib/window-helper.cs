@@ -87,6 +87,7 @@ public class DshWin
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int ht, uint flags);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromRect(ref RECT r, uint flags);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr hMon, ref MONITORINFO info);
     [DllImport("ntdll.dll")] private static extern int NtQueryInformationProcess(IntPtr hProc, int pic, ref PROCESS_BASIC_INFORMATION pbi, int cb, out int pSize);
     [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
@@ -137,7 +138,31 @@ public class DshWin
         return SetWindowPos(h, IntPtr.Zero, x, y, w, ht, 0x14);
     }
 
-    public static bool Maximize(IntPtr h) { return ShowWindow(h, 3); } // SW_MAXIMIZE
+    /// 最大化判定要同时认「当前最大化」和「最大化后被最小化」：
+    /// 后者 showCmd 是 SW_SHOWMINIMIZED(2)，但 flags 里留着 WPF_RESTORETOMAXIMIZED(0x2)。
+    /// 只看 showCmd==3 会在用户最大化后又最小化窗口时丢掉最大化标记（下次启动变回窗口化）。
+    public static bool MaximizedState(IntPtr h)
+    {
+        WINDOWPLACEMENT wp = new WINDOWPLACEMENT();
+        wp.length = (uint)Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+        if (!GetWindowPlacement(h, ref wp)) return false;
+        if (wp.showCmd == 3) return true;                    // SW_SHOWMAXIMIZED
+        if (wp.showCmd == 2) return (wp.flags & 0x2) != 0;   // SW_SHOWMINIMIZED + WPF_RESTORETOMAXIMIZED
+        return false;
+    }
+
+
+    public static bool Maximize(IntPtr h) { return ShowWindow(h, 3); } // SW_MAXIMIZE (也负责显示)
+
+    // 隐藏→归位→显示 三明治用：可见窗口直接 MoveTo 会让用户看见窗口先出现在默认
+    // 位置再跳走；隐藏期间移动则几乎不可见。activate=false 用 SW_SHOWNA 以免抢焦点。
+    public static bool Hide(IntPtr h) { return ShowWindow(h, 0); }            // SW_HIDE
+    public static bool Show(IntPtr h, bool activate) { return ShowWindow(h, activate ? 5 : 8); }
+
+    public static bool IsForeground(IntPtr h)
+    {
+        return GetForegroundWindow() == h;
+    }
 
     public static bool IntersectsMonitor(int x, int y, int w, int ht)
     {

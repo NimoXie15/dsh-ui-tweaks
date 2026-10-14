@@ -126,8 +126,14 @@ function Find-PrimaryWindow([uint32]$HostPid) {
     foreach ($w in [DshWin]::WindowsOfPid($HostPid)) {
         if ($w.ClassName -ne 'Chrome_WidgetWin_1') { continue }
         if (($w.Style -band 0x00040000) -eq 0) { continue } # WS_THICKFRAME: resizable only
-        $wd = $w.Rect.Right - $w.Rect.Left
-        $ht = $w.Rect.Bottom - $w.Rect.Top
+        # 尺寸判定用 GetWindowPlacement 的正常态矩形，不用 GetWindowRect：
+        # 窗口最小化时 GetWindowRect 是 (-32000,-32000) 160x28，会被尺寸门槛筛掉，
+        # helper 随即误判「窗口消失」并停止记录（实测踩过，用户最小化一次就断线）。
+        $cmd = [uint32]0
+        $norm = New-Object 'DshWin+RECT'
+        if (-not [DshWin]::Placement($w.Hwnd, [ref]$cmd, [ref]$norm)) { continue }
+        $wd = $norm.Right - $norm.Left
+        $ht = $norm.Bottom - $norm.Top
         if ($wd -lt 400 -or $ht -lt 300) { continue }
         if (($wd * $ht) -gt $bestArea) { $best = $w; $bestArea = $wd * $ht }
     }
@@ -211,8 +217,14 @@ while ($true) {
                         ([Math]::Abs(($curRect.Right - $curRect.Left) - $state.w) -gt 5) -or ([Math]::Abs(($curRect.Bottom - $curRect.Top) - $state.h) -gt 5)
                     $maxDiffers = ($state.maximized -and $curCmd -ne 3)
                     if ($differs -or $maxDiffers) {
+                        # 隐藏→归位→显示：可见窗口直接 MoveTo 会让用户看见「先出现在默认
+                        # 位置再跳走」，这是「窗口还是老样子」的主要观感来源。隐藏期间移动
+                        # 只剩一帧默认位置；原来在前台就恢复前台，否则不抢焦点。
+                        $wasFg = [DshWin]::IsForeground($win.Hwnd)
+                        [void][DshWin]::Hide($win.Hwnd)
                         [void][DshWin]::MoveTo($win.Hwnd, [int]$state.x, [int]$state.y, [int]$state.w, [int]$state.h)
                         if ($state.maximized) { [void][DshWin]::Maximize($win.Hwnd) }
+                        else { [void][DshWin]::Show($win.Hwnd, $wasFg) }
                         Write-Log ('restore applied (catch-up, window already shown): ' + $state.x + ',' + $state.y + ' ' + $state.w + 'x' + $state.h + ' maximized=' + $state.maximized)
                     } else {
                         Write-Log 'restore skipped: window already at saved bounds'
@@ -229,7 +241,9 @@ while ($true) {
         $showCmd = [uint32]0
         $norm = New-Object 'DshWin+RECT'
         if ([DshWin]::Placement($win.Hwnd, [ref]$showCmd, [ref]$norm)) {
-            $maximized = ($showCmd -eq 3) # SW_SHOWMAXIMIZED
+            # 「最大化后被最小化」也要算最大化（WPF_RESTORETOMAXIMIZED），否则用户
+            # 最大化→最小化→关闭后，下次启动会退化成窗口化。
+            $maximized = [DshWin]::MaximizedState($win.Hwnd)
             # Compare by value signature without a timestamp, otherwise every
             # poll would rewrite the file even when nothing changed.
             $sig = '{0},{1},{2},{3},{4}' -f $norm.Left, $norm.Top, ($norm.Right - $norm.Left), ($norm.Bottom - $norm.Top), $maximized
