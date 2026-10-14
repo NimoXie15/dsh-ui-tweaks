@@ -33,10 +33,7 @@
 param(
     [int]$DshPid = 0,
     [Parameter(Mandatory = $true)][string]$StateFile,
-    [string]$LogPath = '',
-    # Test hook: treat this PID as the host process directly (skip host
-    # discovery). Used by the standalone self-test only.
-    [int]$TestPid = 0
+    [string]$LogPath = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -126,9 +123,10 @@ function Find-PrimaryWindow([uint32]$HostPid) {
     foreach ($w in [DshWin]::WindowsOfPid($HostPid)) {
         if ($w.ClassName -ne 'Chrome_WidgetWin_1') { continue }
         if (($w.Style -band 0x00040000) -eq 0) { continue } # WS_THICKFRAME: resizable only
-        # 尺寸判定用 GetWindowPlacement 的正常态矩形，不用 GetWindowRect：
-        # 窗口最小化时 GetWindowRect 是 (-32000,-32000) 160x28，会被尺寸门槛筛掉，
-        # helper 随即误判「窗口消失」并停止记录（实测踩过，用户最小化一次就断线）。
+        # Size check uses GetWindowPlacement's normal rect, not GetWindowRect:
+        # a minimized window reports (-32000,-32000) 160x28, which the size gate
+        # would filter out - the helper then believes the window vanished and stops
+        # recording (measured: minimizing once broke tracking until the next launch).
         $cmd = [uint32]0
         $norm = New-Object 'DshWin+RECT'
         if (-not [DshWin]::Placement($w.Hwnd, [ref]$cmd, [ref]$norm)) { continue }
@@ -151,19 +149,12 @@ function Read-State {
 }
 
 # ------------------------------------------------------------------ main ----
-$rootPid = 0
-$hostPid = 0
-if ($TestPid) {
-    $rootPid = $TestPid
-    $hostPid = $TestPid
-} else {
-    if ($DshPid -le 0) { Write-Log 'exit: no DshPid'; exit 1 }
-    $rootPid = $DshPid
-    $hostPid = Find-HostPid $DshPid
-    if (-not $hostPid) { Write-Log 'exit: host (DeepSeek Harness.exe) not found'; exit 0 }
-}
+if ($DshPid -le 0) { Write-Log 'exit: no DshPid'; exit 1 }
+$rootPid = $DshPid
+$hostPid = Find-HostPid $DshPid
+if (-not $hostPid) { Write-Log 'exit: host (DeepSeek Harness.exe) not found'; exit 0 }
 Stop-OtherHelpers
-Write-Log ('helper start PID=' + $PID + ' mode=' + $(if ($TestPid) { 'test' } else { 'desktop' }) + ' dshPid=' + $DshPid + ' hostPid=' + $hostPid)
+Write-Log ('helper start PID=' + $PID + ' mode=desktop dshPid=' + $DshPid + ' hostPid=' + $hostPid)
 
 $bootGraceEnd = (Get-Date).AddSeconds(15) # catch-up restore allowed while boot is still settling
 $restoredFor = [IntPtr]::Zero
@@ -174,7 +165,7 @@ $saveCount = 0
 $deadline = (Get-Date).AddSeconds(180)
 while ($true) {
     if (-not (Get-Process -Id $rootPid -EA SilentlyContinue)) { Write-Log 'exit: root dsh process gone'; exit 0 }
-    if ($TestPid -eq 0 -and -not (Get-Process -Id $hostPid -EA SilentlyContinue)) { Write-Log 'exit: host process gone'; exit 0 }
+    if (-not (Get-Process -Id $hostPid -EA SilentlyContinue)) { Write-Log 'exit: host process gone'; exit 0 }
 
     $win = Find-PrimaryWindow $hostPid
     if ($win) {
@@ -193,7 +184,7 @@ $slow = $false
 $tick = 0
 while ($true) {
     if (-not (Get-Process -Id $rootPid -EA SilentlyContinue)) { Write-Log 'exit: root dsh process gone'; exit 0 }
-    if ($TestPid -eq 0 -and -not (Get-Process -Id $hostPid -EA SilentlyContinue)) { Write-Log 'exit: host process gone'; exit 0 }
+    if (-not (Get-Process -Id $hostPid -EA SilentlyContinue)) { Write-Log 'exit: host process gone'; exit 0 }
 
     $win = Find-PrimaryWindow $hostPid
     if ($win -and [DshWin]::Alive($win.Hwnd)) {
@@ -217,10 +208,16 @@ while ($true) {
                         ([Math]::Abs(($curRect.Right - $curRect.Left) - $state.w) -gt 5) -or ([Math]::Abs(($curRect.Bottom - $curRect.Top) - $state.h) -gt 5)
                     $maxDiffers = ($state.maximized -and $curCmd -ne 3)
                     if ($differs -or $maxDiffers) {
-                        # 隐藏→归位→显示：可见窗口直接 MoveTo 会让用户看见「先出现在默认
-                        # 位置再跳走」，这是「窗口还是老样子」的主要观感来源。隐藏期间移动
-                        # 只剩一帧默认位置；原来在前台就恢复前台，否则不抢焦点。
+                        # Hide -> move -> show. Moving an already-visible window makes
+                        # the user watch it appear at the default spot and then jump -
+                        # the main reason it felt like nothing changed. Moving while
+                        # hidden leaves at most one frame at the default position; the
+                        # original foreground state is preserved so focus is not stolen.
                         $wasFg = [DshWin]::IsForeground($win.Hwnd)
+                        # A maximized window ignores SetWindowPos (its placement is owned by
+                        # the monitor), so restore to windowed first when the saved state is
+                        # not maximized. Safe here: the window is already visible.
+                        if ($curCmd -eq 3 -and -not $state.maximized) { [void][DshWin]::Restore($win.Hwnd); Start-Sleep -Milliseconds 60 }
                         [void][DshWin]::Hide($win.Hwnd)
                         [void][DshWin]::MoveTo($win.Hwnd, [int]$state.x, [int]$state.y, [int]$state.w, [int]$state.h)
                         if ($state.maximized) { [void][DshWin]::Maximize($win.Hwnd) }
@@ -241,8 +238,9 @@ while ($true) {
         $showCmd = [uint32]0
         $norm = New-Object 'DshWin+RECT'
         if ([DshWin]::Placement($win.Hwnd, [ref]$showCmd, [ref]$norm)) {
-            # 「最大化后被最小化」也要算最大化（WPF_RESTORETOMAXIMIZED），否则用户
-            # 最大化→最小化→关闭后，下次启动会退化成窗口化。
+            # Maximized-then-minimized still counts as maximized
+            # (WPF_RESTORETOMAXIMIZED); without it, maximize -> minimize -> close
+            # degrades into a windowed restore on the next launch.
             $maximized = [DshWin]::MaximizedState($win.Hwnd)
             # Compare by value signature without a timestamp, otherwise every
             # poll would rewrite the file even when nothing changed.

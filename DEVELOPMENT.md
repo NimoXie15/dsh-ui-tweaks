@@ -38,6 +38,7 @@
   2. **解析（在门禁之后）**：候选不合法时 pnpm 会挑「最新合法版本」（于是装上后版本没变 → 面板判「暂缓」）；但**显式写 `name@版本`** 时它会打印 `Added 1 entry to minimumReleaseAgeExclude in pnpm-workspace.yaml` 并照常安装——这条仍然成立，只是它管不了第 1 条。
 - **豁免表的坑（0.1.5 实测）**：`minimumReleaseAgeExclude` 里同一个包名出现**多条**时**只有文件中靠前的那条生效**（不是并集）。同一份 lockfile/yaml 只改顺序：`[pkg@0.69.0, pkg@0.61.0]` 通过、`[pkg@0.61.0, pkg@0.69.0]` 失败。于是陈旧条目**静默遮蔽**新条目，此后每次安装都被门禁拦下；而一次成功的未成熟安装又会把新条目**追加在末尾**，让旧条重新变成靠前那条 → 下一次安装立刻失败。**这就是 0.1.5 之前用户侧「更新某插件 → 报一长串 pnpm 错误 → 之后所有插件都装不上」的真因。**
 - **对策（0.1.5）**：host 半区新增归并器 `normalizeReleaseAgeExcludes()`（`lib/index.js`），把该表收敛成「每包一条」——同包多条只留"与 lockfile 锁定版本一致"的那条（否则留靠前那条）；受管包名（profile `dependencies` 里的）唯一条且版本 ≠ 锁定版本 → 删除；非受管且不重复的条目不动。结果恒为原条目的**子集**（绝不比现状更宽松）。触发：插件加载时静默一次 + `POST /api/ui-tweaks/normalize-excludes`（client 在安装落地成功后与「重新检查」时 fire-and-forget 调用）。安全约束：只改 `minimumReleaseAgeExclude` 这一段、其余字节逐字节保留；写前留 `pnpm-workspace.yaml.bak-<时间戳>`；同目录临时文件 + `renameSync` 原子替换；写后重读校验；无变化不写盘；幂等；异常一律不外抛。
+  - **0.1.6 收尾**：段落解析与强制豁免**共用** `excludeBlockOf`（原先两份复制代码是隐患：两个写者对「块从哪到哪」必须一致，否则又会造出遮蔽条）；备份/原子替换收敛到 `atomicWriteWorkspace`，并**只保留最近 3 份 `.bak`**（归并器每次加载都跑，旧备份原本会无限堆积）；补了 14 条回归测试（`dirOverride` 指向临时目录，不碰真实 profile）：重复折叠 / 陈旧剪除 / 裸名豁免 / 非受管不动 / 块外字节逐字节不变 / 无变化不写盘 / 无键 / 无 lockfile / `.bak` 上限。
 - **成熟期硬闸（0.1.6，装前校验）**：光靠行状态拦不住点不点得动 —— 实测（用户撞到）：预判还在飞（要拉全量 packument，慢）时那一行还是可点的「有新版本」，点下去 `startOne` 用精确版本 spec，而精确版本会被 pnpm 自动写进豁免表并照常安装 → **未成熟版本被静默装了进去，没有任何确认**，与强制流程的设计意图正好相反。现在 `startOne` 在 `installBundle` 之前调 `guardMaturity(名字, 目标版本, 放行回调)`：未成熟且非强制 → 不装，落回 cooling（回填成熟时刻 + 技术细节 + 排自动重查）并清空 busy 状态；强制流程写 `forcedNames[name]`（一次性凭据，用后即删、`done()` 终态也清）。判定表（隔离测试 10/10）：未成熟且非强制＝拦；有凭据＝放行并消费；已成熟＝放行；registry 没给该版本发布时间＝放行；packument 查询失败＝放行；目标版本未知（`@latest` 兜底路径）＝放行。后三条是**刻意**的：数据源不可用时不该挡住正常更新（宁可漏拦、不误伤），要守的是「窗口内明确可判定时拦住」。
 - **客户端「冷静期中」(cooling)**：两条判定路——① 预判：拉该包**全量 packument** 读 `time[版本]`（`/<pkg>/latest` 与 abbreviated packument 都**没有** `time`，实测），`发布时间 + 窗口 > 现在` 即标 cooling；② 反应式：门禁报错里同时有 `published at <ISO>` 与 `cutoff <ISO>`，于是 `窗口 = now − cutoff`、`成熟时刻 = 发布 + 窗口`（前提是刚失败就解析，秒级误差）。反推窗口只接受 (0, 30 天]，越界退回会话默认值（真实值会从首次报错学到）。cooling 标签**不可点击安装**（只切换详情）；`enqueue` 里还有第二道闸，只有强制流程带 `force` 能过，装前还有第三道闸见上。
 - **强制更新（0.1.6，跳过冷静期）**：真机实测（自带 pnpm 11.7.0，用客户端自己的 Electron 以 `ELECTRON_RUN_AS_NODE=1` 跑 `pnpm.cjs`，隔离临时工程，样本＝发布 4 小时的 `undici@8.12.1`）：
@@ -92,8 +93,11 @@
 - **最大化恢复**：`SetWindowPos` + 需要时 `ShowWindow(SW_MAXIMIZE)`；`rcNormalPosition` 两种状态通吃（最大化时保存的是窗口化矩形），取消最大化不会错位。
 - **保存**：1s 一拍 `GetWindowPlacement`，`showCmd==3` 判最大化；按「值签名」比对（不含时间戳，否则每秒落盘一次），变化才写，`WriteAllText(tmp)` + `Move-Item -Force` 原子覆盖。恢复前用 `MonitorFromRect(MONITOR_DEFAULTTONULL)` 校验坐标仍在某块显示器上，防拔显示器后窗口开到屏幕外。
 - **生命周期**：看门狗盯两个 PID（dsh 运行时、Electron 主进程）任一消失即退出；单实例用锁文件（`window-helper.lock` 存 PID，新 helper 校验存活并杀旧的——旧版按 cmdline 匹配杀过双 helper 并存的跟头）；helper 是运行时的子进程，运行时被杀时随进程树一起死。
-- **⚠️ 编码坑（三次实测中招）**：所有生成的 .ps1 必须带 **UTF-8 BOM**（`lib/index.js` 已加 `\ufeff`）。PS 5.1 对无 BOM 脚本按 ANSI/GBK 解析，中文注释的 UTF-8 字节流会错误配对、**吞掉换行把下一行代码并进注释**——症状是赋值静默不执行/here-string 解析错乱，无任何报错（Parser 都能 parse 过）。用工具生成的临时测试 .ps1 同样要纯 ASCII。
+- **⚠️ 编码坑（五次实测中招，两个 helper 文件必须纯 ASCII）**：所有生成的 .ps1 必须带 **UTF-8 BOM**（`lib/index.js` 已加 `\ufeff`）。PS 5.1 对无 BOM 脚本按 ANSI/GBK 解析，中文注释的 UTF-8 字节流会错误配对、**吞掉换行把下一行代码并进注释**——症状是赋值静默不执行/here-string 解析错乱，无任何报错（Parser 都能 parse 过）。用工具生成的临时测试 .ps1 同样要纯 ASCII。
+  - 0.1.6 又栽了一次**新的变种**：`window-helper.ps1` 里我自己写的中文注释导致 `$cmd = [uint32]0` 被并进注释 —— 生产没问题（index.js 写入时带 BOM），但**仓库里的副本直接跑**（standalone 测试、手动复现）读的是无 BOM 文件 → `[ref]$cmd` 报「无法将 [ref] 应用于不存在的变量」，只在用到该变量时才暴露。所以规则升级为：**`window-helper.ps1` 与 `window-helper.cs` 都保持纯 ASCII**（csc 对无 BOM 源码同样按 ANSI 读），这样有没有 BOM 都不影响；两个文件头都写着 keep pure ASCII，别再往里面塞中文注释。
+- **恢复的一个语义补丁**：Windows 对**最大化窗口会忽略 `SetWindowPos`**（位置归显示器所有，`rcNormalPosition` 不变）。所以「存的窗口化状态、当前却是最大化」时归位会静默失效 —— catch-up 分支现在会先 `SW_RESTORE`（`[DshWin]::Restore`，窗口本来就可见，安全）再隐藏/移动，然后按状态决定是否 `SW_MAXIMIZE`。启动路径不受影响（客户端建窗时必是窗口化）。
 - 文件落点：`<desktop profile>/ui-tweaks/{window-helper.cs, window-helper.dll, window-helper.ps1, window-helper.lock, window-state.json, window-helper.log}`（日志超 96KB 自动截尾）。删 `window-state.json` = 重置记忆。
+- **怎么测（0.1.6 起，已无测试钩子）**：`-TestPid` 那个旁路参数已删除，改成走**真链路**——把**真实客户端**当宿主、把真实 dsh 运行时的 PID 当 `-DshPid`、只换一个**临时状态文件**，于是「沿父链走到最顶层同名进程」这段真的被跑到了（日志能看到完整链条：runtime ← 同名父进程 ← 主进程 ← PowerToys.PowerLauncher 停止）。窗口即使收在托盘也测得了（枚举不看可见性），测完按 `SetWindowPlacement` 把原 placement 还原。走这条路的副产品：**发现 `Program`（C# 里那份编排）早就不等价于 ps1 了**（还用 `GetWindowRect` 判尺寸、只看 `showCmd==3`），于是 0.1.6 把整个 `Program` 删掉（−200 行），`window-helper.cs` 只剩 `DshWin` 互操作层。另：**「把 msedge.exe 改名成 DeepSeek Harness.exe 当假宿主」行不通**——SxS 清单写死了程序名，改名后报「并行配置不正确」，把版本目录做成 junction 也没用。
 
 
 ## 界面/布局改动的验证手法（0.1.6 起）
@@ -132,7 +136,8 @@
 - [ ] `removable === false` / `optional` / 带 `readOnlyReason` 的 bundle 在面板隐藏或标注——否则点了会以 `management-required` 失败。
 - [ ] `installBundle` 的 `registry` 参数补齐（官方传了，本插件省略）。
 - [ ] 插件被禁用/卸载时的运行时清理（目前 DOM 残留到页面刷新为止）。
-- [ ] 归并器收尾：`.bak-<时间戳>` 会随每次改写累积（改成只留最近 N 个或固定单名）；`minimumReleaseAgeExclude` 里出现空行/纯注释行时扫描会提前结束（只漏收敛、不误删），可顺手修成跳过空行继续扫。
+- [x] 归并器收尾（0.1.6 做了一半）：`.bak-<时间戳>` 已改成只留最近 3 份；解析与强制豁免共用 `excludeBlockOf`；14 条回归测试。**剩下**：`minimumReleaseAgeExclude` 里出现空行/纯注释行时扫描会提前结束（只漏收敛、不误删），可顺手修成跳过空行继续扫。
+- [ ] 预检缓存的回收策略：`PUB_TIME_CACHE` 已加「超 500 条时清过期项」的兜底，但没有 LRU/硬上限；若以后按下面那条扩到全量 lockfile，需要更狠的批量/缓存策略。
 - [ ] cooling 的反推窗口依赖"报错新鲜度"：解析被延迟时反推窗口会偏大（现有 30 天上限兜底），偏大表现为**多标**冷静期；可考虑优先用 host 侧策略真值而不是反推。
 - [ ] `鈺?`/`鉁?` 这类残渣的根因在 host 侧读 pnpm stdout 时的解码（UTF-8 被按 CP936 解），client 只能剥 ANSI；根治要动解码或让 host 回报已解码文本。
 

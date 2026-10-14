@@ -7,10 +7,11 @@
 // software silently blocks them).
 //
 // DshWin exposes the Win32 surface the PowerShell orchestrator calls:
-//   WindowsOfPid / Alive / Visible / Placement / MoveTo / Maximize /
-//   IntersectsMonitor / ParentPid
-// Program.Main is a manual diagnostic entry (not used in production):
-//   window-helper.exe --dshpid <pid> --state <json> --log <file> [--testpid <pid>]
+//   WindowsOfPid / Alive / Visible / Placement / MoveTo / Maximize / Hide / Show /
+//   IsForeground / MaximizedState / IntersectsMonitor / ParentPid
+// lib/window-helper.ps1 is the ONLY orchestrator (host discovery + restore/save loop).
+// A Program.Main duplicating that orchestration existed for the earlier standalone-exe
+// approach; deleted in 0.1.6 - it had drifted out of date and nothing called it.
 //
 // Client process tree (all one exe name):
 //   main -> --expose-internals -> spawn-bridge -> dsh runtime -> (helper)
@@ -21,12 +22,8 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
 
 public class DshWin
 {
@@ -138,9 +135,10 @@ public class DshWin
         return SetWindowPos(h, IntPtr.Zero, x, y, w, ht, 0x14);
     }
 
-    /// 最大化判定要同时认「当前最大化」和「最大化后被最小化」：
-    /// 后者 showCmd 是 SW_SHOWMINIMIZED(2)，但 flags 里留着 WPF_RESTORETOMAXIMIZED(0x2)。
-    /// 只看 showCmd==3 会在用户最大化后又最小化窗口时丢掉最大化标记（下次启动变回窗口化）。
+    /// Maximized detection must accept both "currently maximized" and
+    /// "maximized then minimized": the latter reports showCmd SW_SHOWMINIMIZED (2)
+    /// but keeps WPF_RESTORETOMAXIMIZED (0x2) in flags. Checking showCmd == 3 alone
+    /// loses the maximized flag after maximize -> minimize -> close.
     public static bool MaximizedState(IntPtr h)
     {
         WINDOWPLACEMENT wp = new WINDOWPLACEMENT();
@@ -152,10 +150,12 @@ public class DshWin
     }
 
 
-    public static bool Maximize(IntPtr h) { return ShowWindow(h, 3); } // SW_MAXIMIZE (也负责显示)
+    public static bool Maximize(IntPtr h) { return ShowWindow(h, 3); } // SW_MAXIMIZE (also shows)
+    public static bool Restore(IntPtr h) { return ShowWindow(h, 9); }  // SW_RESTORE (un-maximize)
 
-    // 隐藏→归位→显示 三明治用：可见窗口直接 MoveTo 会让用户看见窗口先出现在默认
-    // 位置再跳走；隐藏期间移动则几乎不可见。activate=false 用 SW_SHOWNA 以免抢焦点。
+    // For the hide -> move -> show sandwich: moving a visible window makes the user
+    // watch it appear at the default spot and then jump; moving while hidden is
+    // nearly invisible. activate=false uses SW_SHOWNA so focus is not stolen.
     public static bool Hide(IntPtr h) { return ShowWindow(h, 0); }            // SW_HIDE
     public static bool Show(IntPtr h, bool activate) { return ShowWindow(h, activate ? 5 : 8); }
 
@@ -191,206 +191,5 @@ public class DshWin
             return pbi.InheritedFromUniqueProcessId.ToInt64();
         }
         finally { CloseHandle(h); }
-    }
-}
-
-static class Program
-{
-    private static string stateFile = "";
-    private static string logPath = "";
-    private static long rootPid;
-    private static long hostPid;
-    private static bool testMode;
-    private static DateTime bootGraceEnd;
-    private static IntPtr restoredFor = IntPtr.Zero;
-    private static string lastSig = "";
-    private static int saveCount;
-    private static readonly object LogLock = new object();
-
-    private static void Log(string msg)
-    {
-        if (string.IsNullOrEmpty(logPath)) return;
-        try
-        {
-            lock (LogLock)
-            {
-                var fi = new FileInfo(logPath);
-                if (fi.Exists && fi.Length > 96 * 1024)
-                {
-                    string all = File.ReadAllText(logPath);
-                    File.WriteAllText(logPath, all.Substring(all.Length / 2));
-                }
-                File.AppendAllText(logPath,
-                    "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + msg + Environment.NewLine);
-            }
-        }
-        catch { }
-    }
-
-    private static bool ProcAlive(long pid)
-    {
-        if (pid <= 0) return false;
-        try { Process.GetProcessById((int)pid); return true; }
-        catch { return false; }
-    }
-
-    private static string ProcName(long pid)
-    {
-        try { return Process.GetProcessById((int)pid).ProcessName; }
-        catch { return null; }
-    }
-
-    private static int JNum(string json, string key)
-    {
-        Match m = Regex.Match(json, "\"" + key + "\":\\s*(-?\\d+)");
-        int v;
-        return (m.Success && int.TryParse(m.Groups[1].Value, out v)) ? v : 0;
-    }
-
-    private static bool JBool(string json, string key)
-    {
-        return Regex.Match(json, "\"" + key + "\":\\s*true").Success;
-    }
-
-    private class SavedState
-    {
-        public int X, Y, W, H;
-        public bool Maximized;
-    }
-
-    private static SavedState ReadState()
-    {
-        try
-        {
-            string raw = File.ReadAllText(stateFile);
-            if (!Regex.Match(raw, "\"version\":\\s*1").Success) return null;
-            var s = new SavedState();
-            s.X = JNum(raw, "x");
-            s.Y = JNum(raw, "y");
-            s.W = JNum(raw, "w");
-            s.H = JNum(raw, "h");
-            s.Maximized = JBool(raw, "maximized");
-            if (s.W <= 0 || s.H <= 0) return null;
-            return s;
-        }
-        catch { return null; }
-    }
-
-    private static void SaveState(DshWin.RECT norm, bool maximized)
-    {
-        string json = "{\"version\":1,\"x\":" + norm.Left + ",\"y\":" + norm.Top +
-            ",\"w\":" + (norm.Right - norm.Left) + ",\"h\":" + (norm.Bottom - norm.Top) +
-            ",\"maximized\":" + (maximized ? "true" : "false") +
-            ",\"updatedAt\":\"" + DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss") + "\"}";
-        try
-        {
-            string tmp = stateFile + ".tmp";
-            File.WriteAllText(tmp, json);
-            MoveFileEx(tmp, stateFile, 0x1); // MOVEFILE_REPLACE_EXISTING
-            saveCount++;
-            Log("state saved #" + saveCount + ": " + json);
-        }
-        catch (Exception e) { Log("state write failed: " + e.Message); }
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool MoveFileEx(string src, string dst, int flags);
-
-    private static readonly Regex ReHost = new Regex("deepseek[ _-]?harness(\\.exe)?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    // Manual diagnostic entry, not used in production (the PS orchestrator
-    // drives DshWin directly). Kept for standalone testing of this file.
-    static int Main(string[] args)
-    {
-        try { return RunMain(args); }
-        catch (Exception e)
-        {
-            try { File.AppendAllText(logPath, "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] FATAL: " + e + Environment.NewLine); } catch { }
-            return 3;
-        }
-    }
-
-    static int RunMain(string[] args)
-    {
-        long dshPid = 0, testPid = 0;
-        for (int i = 0; i + 1 < args.Length; i++)
-        {
-            if (args[i] == "--dshpid") { long.TryParse(args[i + 1], out dshPid); }
-            else if (args[i] == "--testpid") { long.TryParse(args[i + 1], out testPid); }
-            else if (args[i] == "--state") { stateFile = args[i + 1]; }
-            else if (args[i] == "--log") { logPath = args[i + 1]; }
-        }
-        if (string.IsNullOrEmpty(stateFile)) return 2;
-
-        testMode = testPid > 0;
-        if (testMode) { rootPid = testPid; hostPid = testPid; }
-        else
-        {
-            if (dshPid <= 0) { Log("exit: no dshpid"); return 1; }
-            rootPid = dshPid;
-            DateTime t0 = DateTime.UtcNow;
-            long p = DshWin.ParentPid(dshPid);
-            if (p > 0)
-            {
-                string name = ProcName(p);
-                if (name != null && ReHost.IsMatch(name)) { hostPid = p; }
-            }
-            Log("host resolved to PID=" + hostPid + " in " + (int)(DateTime.UtcNow - t0).TotalMilliseconds + "ms (topmost-match walk lives in the PS orchestrator)");
-            if (hostPid <= 0) { Log("exit: host not found"); return 0; }
-        }
-        Log("helper start pid=" + Process.GetCurrentProcess().Id +
-            " mode=" + (testMode ? "test" : "desktop") +
-            " dshPid=" + dshPid + " hostPid=" + hostPid);
-        bootGraceEnd = DateTime.UtcNow.AddSeconds(15);
-
-        DshWin.WinInfo win = null;
-        while (true)
-        {
-            if (!ProcAlive(rootPid)) { Log("exit: root dsh process gone"); return 0; }
-            if (!testMode && !ProcAlive(hostPid)) { Log("exit: host process gone"); return 0; }
-            win = FindPrimaryWindow(hostPid);
-            if (win != null) break;
-            Thread.Sleep(100);
-        }
-        while (true)
-        {
-            if (!ProcAlive(rootPid)) { Log("exit: root dsh process gone"); return 0; }
-            if (!testMode && !ProcAlive(hostPid)) { Log("exit: host process gone"); return 0; }
-            if (win != null && DshWin.Alive(win.Hwnd))
-            {
-                if (win.Hwnd != restoredFor) { restoredFor = win.Hwnd; }
-                uint showCmd; DshWin.RECT norm;
-                if (DshWin.Placement(win.Hwnd, out showCmd, out norm))
-                {
-                    bool maximized = (showCmd == 3);
-                    string sig = norm.Left + "," + norm.Top + "," + (norm.Right - norm.Left) + "," +
-                        (norm.Bottom - norm.Top) + "," + maximized;
-                    if (sig != lastSig) { lastSig = sig; SaveState(norm, maximized); }
-                }
-                Thread.Sleep(1000);
-            }
-            else
-            {
-                Thread.Sleep(1000);
-            }
-        }
-    }
-
-    static DshWin.WinInfo FindPrimaryWindow(long hostPid)
-    {
-        if (hostPid <= 0) return null;
-        DshWin.WinInfo[] wins = DshWin.WindowsOfPid((uint)hostPid);
-        DshWin.WinInfo best = null;
-        long bestArea = 0;
-        foreach (DshWin.WinInfo w in wins)
-        {
-            if (w.ClassName != "Chrome_WidgetWin_1") continue;
-            if ((w.Style & 0x00040000) == 0) continue; // WS_THICKFRAME
-            int wd = w.Rect.Right - w.Rect.Left;
-            int ht = w.Rect.Bottom - w.Rect.Top;
-            if (wd < 400 || ht < 300) continue;
-            if ((long)wd * ht > bestArea) { best = w; bestArea = (long)wd * ht; }
-        }
-        return best;
     }
 }
