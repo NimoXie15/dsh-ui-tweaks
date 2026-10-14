@@ -66,6 +66,21 @@
 - **取舍**：与 dsh-web-shell 的 `forceAnimations` 相同——覆盖系统无障碍设置。窗口级覆盖（启动器）换成会话级覆盖（插件），想恢复系统行为就得停用本插件；将来要做成可开关就着 dsh-model-organizer 的设置卡方案。
 - web 窗口里本模块与 dsh-web-shell 的 CDP 覆盖并存是**无害冗余**（都指向 no-preference）。
 
+## 窗口记忆（模块 6，仅 host 半区）
+
+官方桌面客户端主窗口写死 1280×820 居中、主进程无任何窗口状态持久化（app.asar 里 `createWindow` 无 placement 逻辑）；渲染层 `contextIsolation+sandbox` 且 `dshDesktop` 桥只暴露给 `dsh-app://app` 主框架——client 半区拿不到任何窗口能力。因此实现走**进程外**：host 半区 spawn 隐藏 PowerShell helper（`lib/window-helper.ps1`），Win32 互操作来自 `lib/window-helper.cs` 预编译的 `window-helper.dll`（拷到 profile 的 `ui-tweaks/` 下运行）。
+
+- **为什么不是独立 exe（重要，别走回头路）**：先做过 csc 编译的 winexe 版，结果 Windows/安全软件对本地编译的无签名 exe 反复弹「无法验证发布者」、且会被静默拦截（进程秒退、无任何日志）。改成 **DLL 由 PowerShell 进程内加载**：零安全提示。且 DLL 必须用 `Assembly.Load(byte[])` 字节流加载——profile 在云盘/虚拟盘路径上时 `Add-Type -Path`/`LoadFrom` 会报 `0x80131515` 不支持操作。
+- **找宿主进程的坑（实测）**：客户端进程树是 `主进程 -> --expose-internals -> spawn-bridge -> dsh 运行时`，**四层全叫 `DeepSeek Harness.exe`**（运行时是 ELECTRON_RUN_AS_NODE=1 的 Electron）。所以既不能从运行时自己开始匹配（把自己当宿主），也不能取第一个同名祖先（匹配到无窗口的中间层）——必须**沿父链向上走到最后一个同名进程**（树根 = 主进程）。走链用 ntdll `NtQueryInformationProcess` + .NET Process（无 WMI，冷启动 100ms~2s 的延迟吃过亏）。
+- **恢复时机 = catch-up，这是物理极限**：实测客户端在 dsh 运行时起来**之前**就把窗口 show 出来了（热启动 0.3s 内可见），所以「赶在 show:false 隐藏期恢复」从插件侧原理上做不到；真实可达的是启动后 ~0.15~0.4s 内 catch-up 归位（helper start → applied 实测 0.15s）。15s 启动宽限期内对可见窗口直接 MoveTo/最大化归位；之后 late adoption 不再动窗口。弹窗类（ego-browser、更新面板）都在归位之后才打开，锚定不受影响。
+- **识别宿主窗口**：枚举宿主 PID 的顶层窗口，过滤 `Chrome_WidgetWin_1` + `WS_THICKFRAME`（可缩放）+ ≥400×300，取最大者。欢迎窗（600×700 固定）、更新弹窗因此天然被排除；窗口标题是动态的（跟随页面），不能靠标题。
+- **最大化恢复**：`SetWindowPos` + 需要时 `ShowWindow(SW_MAXIMIZE)`；`rcNormalPosition` 两种状态通吃（最大化时保存的是窗口化矩形），取消最大化不会错位。
+- **保存**：1s 一拍 `GetWindowPlacement`，`showCmd==3` 判最大化；按「值签名」比对（不含时间戳，否则每秒落盘一次），变化才写，`WriteAllText(tmp)` + `Move-Item -Force` 原子覆盖。恢复前用 `MonitorFromRect(MONITOR_DEFAULTTONULL)` 校验坐标仍在某块显示器上，防拔显示器后窗口开到屏幕外。
+- **生命周期**：看门狗盯两个 PID（dsh 运行时、Electron 主进程）任一消失即退出；单实例用锁文件（`window-helper.lock` 存 PID，新 helper 校验存活并杀旧的——旧版按 cmdline 匹配杀过双 helper 并存的跟头）；helper 是运行时的子进程，运行时被杀时随进程树一起死。
+- **⚠️ 编码坑（三次实测中招）**：所有生成的 .ps1 必须带 **UTF-8 BOM**（`lib/index.js` 已加 `\ufeff`）。PS 5.1 对无 BOM 脚本按 ANSI/GBK 解析，中文注释的 UTF-8 字节流会错误配对、**吞掉换行把下一行代码并进注释**——症状是赋值静默不执行/here-string 解析错乱，无任何报错（Parser 都能 parse 过）。用工具生成的临时测试 .ps1 同样要纯 ASCII。
+- 文件落点：`<desktop profile>/ui-tweaks/{window-helper.cs, window-helper.dll, window-helper.ps1, window-helper.lock, window-state.json, window-helper.log}`（日志超 96KB 自动截尾）。删 `window-state.json` = 重置记忆。
+
+
 ## 从 dsh-web-shell 迁移的功能
 
 对话区左侧滚动条与宽表格修复原是 dsh-web-shell 的 CDP 注入脚本，已整体迁入本插件（client bundle 自由 JS），dsh-web-shell 自身删除了对应代码与 `leftScrollbar` / `tableWidthFix` 配置。此处不重复实现细节（`lib/client.js` 各模块注释里保留：宿主挂 body 的理由、composerSeat 裁剪 −4px、拖动三层防御、零位移 wheel 事件解阅读锚点、出血布局三件套），只记两条迁移后才知道的知识：
