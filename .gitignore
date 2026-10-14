@@ -14,3 +14,6 @@ node_modules/
 # npm credentials — never commit a token
 .npmrc
 *.tgz
+# window-helper build artifacts (compiled on the fly by lib/index.js)
+lib/window-helper.dll
+lib/window-helper.lock
