@@ -38,7 +38,14 @@ dsh plugin --profile web add @nimoxie/dsh-ui-tweaks
 
 装完重启服务（关掉再 `dsh web`）。
 
-桌面客户端：桌面 profile 由客户端独占管理，CLI 装不了（会被拒），请在客户端「插件管理」页添加包名 `@nimoxie/dsh-ui-tweaks`，重启客户端生效。
+桌面客户端：桌面 profile **保留给客户端**，PATH 上那个 `dsh`（npm 全局装的）会被拒。但客户端**自带的那份 CLI 可以** —— 它就在安装目录里，和「插件管理」页走的是同一套实现：
+
+```sh
+# Windows 桌面端；<安装目录> 形如 E:\tools\DeepSeek Harness
+"<安装目录>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add @nimoxie/dsh-ui-tweaks
+```
+
+不想敲命令，也可以照旧在客户端「插件管理」页添加包名 `@nimoxie/dsh-ui-tweaks`，重启客户端生效。
 
 卸载（CLI 可管理的 `web` 环境）：
 
@@ -86,7 +93,13 @@ dsh plugin --profile web remove <PluginName>
 dsh --profile web --dump-config | findstr /i <PluginName子串>
 ```
 
-桌面客户端对指令安装有限制，请直接在客户端「插件管理」中进行安装、卸载和查看。
+桌面客户端：PATH 上的 `dsh` 装不了（桌面 profile 被保留给客户端），但客户端自带的那份 CLI 可以 —— 把上面的 `dsh plugin --profile web` 换成：
+
+```sh
+"<安装目录>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add <PluginName>
+```
+
+也可以直接在客户端「插件管理」中进行安装、卸载和查看。
 
 常用插件（web 与桌面端都能用）：
 
