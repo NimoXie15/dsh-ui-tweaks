@@ -4,7 +4,7 @@
 
 ## 骨架（与 dsh-model-organizer 同构）
 
-- `lib/index.js`：host 半区，挂两条回环路由（`GET /api/ui-tweaks/local-plugins` 本地包识别、`POST /api/ui-tweaks/normalize-excludes` 豁免表归并），并在加载时静默归并一次；细节见「更新检查」。
+- `lib/index.js`：host 半区，挂五条回环路由 —— 本地来源识别 + 运行中 DSH 版本（`GET /api/ui-tweaks/local-plugins`，含 `dsh` 字段）、豁免表归并（`POST /api/ui-tweaks/normalize-excludes`）、强制预检与写豁免（`POST precheck-exempt` / `POST force-exempt`）、立即重启（`GET|POST /api/ui-tweaks/restart`）；加载时还会静默归并一次。细节见「更新检查」与「立即重启」。
 - `lib/client.js`：浏览器半区，`module.exports = { name, apply, inject }`；`apply(ctx)` 由客户端 cordis 上下文调用。
 - `cordis.patch.yml`：`- insert: [{id: ui-tweaks, name: '@nimoxie/dsh-ui-tweaks'}]`。**profile 必须声明 `dsh.bundle.patch`，否则 dsh 启动即报 declares no dsh.bundle**；**insert.name 必须写全 scope**（loader 按它在 node_modules 解析包）。
 - `package.json`：`exports["./client"]` 指向 client bundle；`dsh.client.platform: "web"`；inject 只需 `@deepseek-ai/dsh-api-remotes`（`remote.*` 服务由它提供）。`react` / `react-dom` 等是 shell 内置（PLATFORM_MODULES），不用声明。
@@ -49,6 +49,8 @@
   - 验证：host 隔离 15/15（写入位置、字节保留、去重、预检筛选、目标跳过、豁免生效后不再拦）；UI 渲染 9/9（入口/预检中/拒绝清单/二次确认/失败态）；真机路由实测（真实 profile 上 `precheck-exempt` 返回 `{ok:true,blocked:[]}`，`local-plugins` 回归正常）。
 - **cooling 文案（0.1.6 定稿）**：列表里默认只有**一句话**——`0.70.0 还需等待 10 小时 40 分才能更新（10-15 07:54 到期，点标签看详情）`（原文案把「供应链冷静期 / minimumReleaseAge / 门禁 / profile」四个未解释术语塞在一句里，末句还是「不是本插件的问题」这种防御性措辞）。完整解释走 `coolingReasonText(detail, windowMs)`，**只在点「冷静期中」标签展开时渲染**（`.dtl`）：为什么有这段等待（dsh 的 24 小时策略讲成人话）→ 冷却期内硬装的后果（连坐整个 profile，故不提供直接安装）→ 到点自动恢复 → 末尾附原始诊断（预检＝registry 记录，反应式＝pnpm 报错）。等待期已过 / 结束时间未知各有专门文案；已过期时不再说「会被拦下」，避免自相矛盾。换行由 `.why` 的 `white-space:pre-wrap` 呈现。
 - **到期自动重查（0.1.6）**：`scheduleCoolingRefresh(name, matureAt)` 给 cooling 行排一个到点（+3s 缓冲）的 `checkOne(name)` 定时器，按包名去重（重复预判/重查只留最后一个）；触发点＝`applyCoolingGuess` 预判落 cooling 后、`judge` 的冷却分支落 cooling 后。超时上限（约 24.8 天）之外不排。这样用户不必记时间，到点自动变回「有新版本」。
+- **兼容门禁（0.1.7，借鉴 plugin-manager）**：新版的 registry 清单可能声明运行它的 DSH 最低版本（`dsh.engines.dsh` → 顶层 `engines.dsh` → `peerDependencies["@deepseek-ai/dsh"]`，同一套取值顺序）。本机版本由 host 半区读 `profileContext.installAnchor` 的清单（打包桌面端唯一答得上的来源），兜底读 profile 里的 `@deepseek-ai/dsh`。低于要求 → 该行标 **「DSH 不符」**（悬停给「需要 DSH ≥ x」）、不给点，也不计入「全部更新」。**只认 `>=x.y.z`**；未声明、写法不认识（`^`/`~`）、本机版本读不到 → 一律不拦（宁可漏拦，不误伤正常更新；装前还有 pnpm 自身与守卫兜着）。
+- **面板脚注**：底部常驻一句「只检查第三方插件；官方 @deepseek-ai/ 包随 DSH 本体升级。」（与 plugin-manager 同款口径，把边界写在明处）。
 - **本机实测环境**：dsh 用的是**自带的 pnpm 11.7.0**，**不是** PATH 上那个（本机 PATH 是 11.21.0）；排查这类问题必须用前者复现，否则结论会反过来。桌面客户端的自带运行时在 **`<客户端安装目录>/resources/runtime/`**：`pnpm/`（11.7.0 包）、`bin/node`（shim，实际 exec `$DSH_DESKTOP_NODE_EXECUTABLE`＝客户端自己的 Electron + `ELECTRON_RUN_AS_NODE=1`）、`versions.json`（node 24.18.1 / pnpm 11.7.0）。复现命令形如：`ELECTRON_RUN_AS_NODE=1 npm_config_minimum_release_age=1440 "<客户端>/DeepSeek Harness.exe" --expose-internals "<客户端>/resources/runtime/pnpm/bin/pnpm.cjs" add <pkg>@<ver> --registry=https://registry.npmjs.org/`（`minimumReleaseAge` 由 dsh 以环境变量注入，不在任何配置文件里）。
 - 参考实现：社区分叉版 `@linxin666/dsh-client-ui-plugin-manager` 的 update handler 也是先 `fetchManifest` 拿 registry 的 `version`，再 `installBundle(name@version)`——它「能更新」不是因为绕过了门禁，而是因为它用的是精确版本（只绕开第 2 条路径）。
 
@@ -100,6 +102,20 @@
 - **怎么测（0.1.6 起，已无测试钩子）**：`-TestPid` 那个旁路参数已删除，改成走**真链路**——把**真实客户端**当宿主、把真实 dsh 运行时的 PID 当 `-DshPid`、只换一个**临时状态文件**，于是「沿父链走到最顶层同名进程」这段真的被跑到了（日志能看到完整链条：runtime ← 同名父进程 ← 主进程 ← PowerToys.PowerLauncher 停止）。窗口即使收在托盘也测得了（枚举不看可见性），测完按 `SetWindowPlacement` 把原 placement 还原。走这条路的副产品：**发现 `Program`（C# 里那份编排）早就不等价于 ps1 了**（还用 `GetWindowRect` 判尺寸、只看 `showCmd==3`），于是 0.1.6 把整个 `Program` 删掉（−200 行），`window-helper.cs` 只剩 `DshWin` 互操作层。另：**「把 msedge.exe 改名成 DeepSeek Harness.exe 当假宿主」行不通**——SxS 清单写死了程序名，改名后报「并行配置不正确」，把版本目录做成 junction 也没用。
 
 
+## 立即重启（模块 7，host 路由 + 独立弹窗）
+
+- **为什么需要**：插件更新只改了磁盘上的 profile，loader 在启动时读清单，所以必须重启才生效。官方插件页没有这个入口，dsh-web-all 家族的 plugin-manager 有一个 —— 本插件自建一份，做法对齐它已经踩过的坑。
+- **三段式**：`GET /api/ui-tweaks/restart` 只读「方案」（无副作用，浏览器预取、直接粘 URL 都不会停进程）→ 确认 → `POST` 才执行（先写 `202 {ok,mode}`，约 0.4s 后退出）。非回环 403、其它方法 405。
+- **先问会话在不在跑**（本插件比 plugin-manager 多的那一步）：点按钮先并行读「重启方案」和客户端 `sessions` 服务的运行态（`ctx.get('sessions').list.getSnapshot().byId[*].running`，`refresh()` 后读快照，900ms 超时退回旧快照）。**三种结果都落到同一个确认面板**，只是文案不同：N 个在跑 → 列出前 5 个会话标题并说明会中断；0 个 → 说明不会打断任何任务；问不到（服务缺失/形状不认识）→ 按保守说明。**永不自动执行** —— 重启是进程级动作，必须由用户点「重启 dsh」（旁边永远有「取消」；`manual` 模式连重启按钮都不给）。
+- **三种模式**（`planRestart` 纯函数，按运行形态判）：① 桌面客户端（`ELECTRON_RUN_AS_NODE=1` 或 `process.versions.electron`）→ `shell`：插件重启不了 Electron 的进程树，只自己退出，由外壳弹它自己的「应用无法启动或已意外停止」对话框（在那里点「重启」才是 `app.relaunch()`）。② 终端里跑的 dsh（stdin/stdout 是 TTY）→ `relaunch`：`node -e <自包含助手>` detached 起一个助手，等旧进程消失（上限 30s）后按**原命令行**重拉，剔除 `--inspect*` / `--debug*`（会让新进程重新绑定端口），新进程 3 秒内秒退最多重试 5 次，日志写 `$DSH_HOME/logs/ui-tweaks-restart.log`。③ 无 TTY / 被监督 → `manual`，如实告诉用户手动重启。
+- **绝不把用户丢在没有服务的状态**：`relaunch` 起不了助手就退化为 `manual`（进程留在原地），只有确认能重拉才安排退出；连接先断（宿主已退出）不报成失败，按「已发出请求」收尾。
+- **文案按形态讲清「点下去会发生什么」**：桌面端必须说透两步（① dsh 先退出、页面断开；② 客户端弹官方的「应用无法启动或已意外停止」对话框，**在那里点「重启」才会真正拉起来**），并补一句「对话框会写一份崩溃报告；也可手动退出后重开」；`relaunch` 说「服务重拉、正在运行的任务会中断」；`manual` 只说手动重启，**并且不给「重启」按钮**（给了只是骗人）。
+- **弹窗定位**：两个面板（更新 / 重启）共用 `placeNear(anchor, wrap, width, minHeight)` —— 贴着触发按钮，**优先放按钮下方**，下方放不下（或不如上方宽裕）就翻到上方；水平夹在视口内；可用空间直接写成 `max-height` 让内容自己滚。`resize` 与 `scroll`（capture）经 rAF 合并后重排；**两个面板都不可拖动**：位置只有一个来源（触发它的那枚按钮），标题栏无移动光标。旧版更新面板支持拖拽并记忆位置，出现过「拖过一次就再也不跟按钮、不跟滚动」的问题（用户实测反馈），现已整段移除 —— 拖拽、`panelPinned`/`panelDragging` 状态、本地存储坐标全部不再存在。
+- **颜色语义**：「立即重启」按钮（红描边 + 主题 `label-danger` 文字）与弹窗里的确认按钮都是红色 —— 它是本插件里唯一会打断进行中任务的动作；橙色留给「强制更新」，绿色只留给状态（已是最新 / 已更新 N 个的提示条）。
+- **UI**：与更新面板**分家**——重启有自己的 Shadow DOM 弹窗（`dshuiw-restart-panel-host`），按按钮的屏幕矩形定位在它下方；按钮本身挂到官方「已安装」标题行右侧（见下条），常带一圈绿色内描边。
+- **按钮位置**：找 `[data-plugin-panel] [data-plugin-group="bundles"]` 的第一个子元素＝「已安装」标题行（plugin-manager 用的同一个座位；标题是页面自己的 chrome，没有插槽席位），把 `span#dshuiw-list-actions` 塞进去靠 `margin-left:auto` 靠右；两个按钮的样式用 dsh 主题变量自绘（座位那一行没有官方按钮可当模子）。React 重渲染会抹掉手插节点，MO + 轮询兜底补挂。
+- **测试**（隔离，`%TEMP%\dshuiw-restart-test\`）：host 16/16 —— 四种方案判定、`manual` 不退出、助手失败不退出、`relaunch`/`shell` 恰在 400ms 后退出、5 条路由都注册、`local-plugins` 带 `dsh` 字段、非回环 403、PUT 405、GET 无副作用、POST 202（放子进程里跑，避免测试进程把自己重启）；client 36/36 —— 兼容门禁判定表（含等号边界、`1.10.0 > 1.9.9`、未声明/不认识/版本未知都不拦）、会话运行态（1 个/0 个/服务缺失/只列前 5）、弹窗各态渲染与转义（含 shell 两步说明、`manual` 不给重启按钮、**0 个会话仍要确认并写明不打断任务**）、**任何会话数下都不自动执行**（源码里倒计时相关标识全无）、**弹窗定位**（放得下就在按钮下方、放不下翻到上方、左右夹住、量不到按钮退回右上角、隐藏时不碰它）、接线（先 GET 方案、两个面板都走 `placeNear`、滚动/窗口重排、拖过后不再跟随、红色语义、按钮挂到 bundles 组、脚注、`dsh` 标签）。
+- **尚未真机端到端**：本仓库是 `link:` 装法，host 路由要**重启客户端**才加载，而重启会终结当前会话 —— 留给用户首次点击验证。
 ## 界面/布局改动的验证手法（0.1.6 起）
 
 面板是 Shadow DOM + 运行时拼字符串，肉眼看不出「差了几个像素」，靠猜会来回改。有效做法是**量出来**：
@@ -128,6 +144,7 @@
 - [x] 0.1.4：终态改读 `installBundle().value`（`waitForInstall` 只在信封失败时兜一次）；取消不再清空队列、排队项可单独取消；`checkNow` 回填 busy/queuing；失败原因（`error`/`packageResult`/`pendingBuilds`）落到面板；`enabled` 沿用清单里的真实状态。
 - [x] 0.1.5：新增「冷静期中」(cooling)——预判（全量 packument 的 `time`）+ 报错反推成熟时刻，标签不可点击安装、`enqueue` 二次拦截；host 半区新增 `minimumReleaseAgeExclude` 归并器与 `POST /api/ui-tweaks/normalize-excludes`（安装成功/重新检查时 fire-and-forget）；失败文案剥 ANSI、同一份 pnpm 输出去重、cooling 详情折叠；纠正 0.1.4 关于 `minimumReleaseAge` 的半个结论。
 - [x] 0.1.6：桌面客户端窗口记忆（预编译 DLL + PowerShell helper）；更新落地后头部常驻「重启生效」提示条；cooling 行默认一句话（`…才能更新（10-15 07:54 到期，点标签看详情）`）、完整解释与原始诊断收进点标签才展开的详情；cooling 到期自动重查；**强制更新（跳过冷静期）**——host 两条回环路由（预检 + 写生效豁免）、客户端三段式交互、`enqueue(name,{force:true})` 放行；预检发现别的包也会被拦时**直接拒绝并列出**；**装前成熟期硬闸**（`guardMaturity`，堵住「预判未返回时点『有新版本』可静默装未成熟版本」的漏，判定表隔离测试 10/10）；归并器/窗口 helper 的两个实测 bug 修复（最小化窗口断线跟踪、归位改「隐藏→移动→显示」）。
+- [ ] 0.1.7（待发布）：立即重启（模块 7，独立弹窗 + 会话运行态判断）、兼容门禁（`DSH 不符`）、按钮迁到「已安装」标题行右侧并自绘样式、面板加「只查第三方」脚注 —— 发布时同步 `package.json` 与 `lib/client.js` 的 BUILD、打 v0.1.7 tag；README / DEVELOPMENT 已按本次改动更新。
 - [ ] 窗口记忆「零闪现」：唯一途径是常驻 watcher 进程（不属于 dsh 运行时、跨客户端重启存活、守在客户端启动前归位）；代价是后台常驻进程 + 卸载后残留需自清理。**待与用户确认是否接受这个代价**（用户倾向先继续讨论更优方案）。
 - [ ] cooling 预检可以更准：现在只扫直连依赖（importers 段）；传递依赖里若混进未成熟条目，只能靠安装失败时的反应式报错点名。若要覆盖全量 lockfile，得为几百个条目查发布时间（需要更狠的缓存/批量策略，或找 registry 的批量接口）。
 - [ ] cooling 预检（lockfile 成熟度扫描）：为「这次安装会不会被门禁拦下、被谁拦下」提供提前诊断；需拉 N 个包的发布时间，有耗时/缓存设计问题，建议与上面「强制更新」一起做。
