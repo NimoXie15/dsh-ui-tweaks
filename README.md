@@ -121,8 +121,8 @@ dsh plugin --profile web add dsh-cost-meter
 # dsh-ego-browser：模拟浏览器点击
 dsh plugin --profile web add dsh-ego-browser
 
-# dsh-file-review：文件改动审查
-dsh plugin --profile web add dsh-file-review
+# dsh-ops：bash / PowerShell 7 与 Rust 高性能工具
+dsh plugin --profile web add dsh-ops
 
 # dsh-whale-widget：右下角小鲸鱼挂件
 dsh plugin --profile web add dsh-whale-widget
