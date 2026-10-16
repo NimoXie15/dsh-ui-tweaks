@@ -19,7 +19,7 @@
   dsh plugin --profile web add "link:<本仓库绝对路径>"
   ```
 - 改完 client.js 后页面要 **Ctrl+Shift+R**（bundle 以 `Cache-Control: immutable` 下发且 URL 不随代码变化，普通刷新一直吃缓存）。加载/卸载插件需要**重启 dsh web**。
-- **桌面 profile 由 Electron 独占管理**：npm 版 CLI 装/卸会被拒（对它的报错是 `managed exclusively by the Electron application`）。两条路：① 客户端插件管理页安装，spec 填 `link:<路径>`；② 应用完全退出后手动改四件套（package.json 依赖 + `dsh.profile.bundles`、pnpm-lock importers、node_modules 软链）。客户端会监听 package.json 变化、自动用自带 pnpm 建好软链。
+- **桌面 profile 由 Electron 独占管理**：npm 版 CLI 装/卸会被拒（报错 `managed exclusively by the Electron application`）。**但客户端自带的那份 CLI 可以（0.1.8 修订）**：`<客户端安装目录>/resources/runtime/cli/bin/dsh.cmd` 走 `dsh-desktop-host/lib/cli.js`，它以 `manageDesktopProfile: true` 调 `runCli`，于是 `dsh plugin --profile desktop add|remove <包>` 与「插件管理」页是同一套实现（同一条 pnpm、同一把 `package.json` 文件锁、同样自动登记 `dsh.profile.bundles`）；实测用它连装 5 个插件、全部成功。三条路：① 上面这份自带 CLI（最省事，装完重启客户端生效）；② 客户端插件管理页安装，spec 填 `link:<路径>`；③ 应用完全退出后手动改四件套（package.json 依赖 + `dsh.profile.bundles`、pnpm-lock importers、node_modules 软链）。客户端会监听 package.json 变化、自动用自带 pnpm 建好软链。
 
 ## 已知坑
 
@@ -112,13 +112,27 @@
 - **绝不把用户丢在没有服务的状态**：`relaunch` 起不了助手就退化为 `manual`（进程留在原地），只有确认能重拉才安排退出；连接先断（宿主已退出）不报成失败，按「已发出请求」收尾。
 - **文案按形态讲清「点下去会发生什么」**：桌面端必须说透两步（① dsh 先退出、页面断开；② 客户端弹官方的「应用无法启动或已意外停止」对话框，**在那里点「重启」才会真正拉起来**），并补一句「对话框会写一份崩溃报告；也可手动退出后重开」；`relaunch` 说「服务重拉、正在运行的任务会中断」；`manual` 只说手动重启，**并且不给「重启」按钮**（给了只是骗人）。
 - **确认后的蒙皮**：点「重启 dsh」即把整页蒙住（`.rscrim` 与弹窗同一个阴影根，`z-index:2147483000`，弹窗 `…001` 仍在最上层可交互；并拦掉 `wheel`/`touchmove`，免得还能滚下面的页面）—— 客户端此刻已不可用，底下元素不该还能点。蒙皮只在「确认执行」期间存在：失败出口与 `manual` 退化出口都会撤掉它把操作权还给用户；另有 `RST_KILL_WAIT_MS`（20s）兜底 —— 到时页面还活着就撤蒙皮、落 `error` 并提示刷新/手动重启，绝不把人永远蒙在里面。
+  - **0.1.8 补的两处（蒙皮只挡指针是不够的）**：键盘仍能 Tab 到蒙皮后面的元素并回车激活，所以 `showScrim(true)` 同时把 `body` 的其它子树整块 `inert`（跳过重启弹窗自己的宿主；Chromium 102+），关掉时逐个还原；另在捕获段接一个 keydown 拦掉 PageDown/PageUp/空格/方向键/Home/End 这类纯滚动键 —— 焦点在弹窗里时不拦（事件 target 会被重定向成宿主），弹窗该能自己滚、按钮也该能用空格触发。
 - **确认之后的收尾**：`POST` 成功且模式是 `shell` / `relaunch` 时**停在「正在重启…」**（文案自己讲清下一步：dsh 先退出、到客户端对话框里点「重启」），**不给按钮** —— 宿主 0.4s 后就退出、弹窗随页面一起消失，给「知道了」也点不到（用户实测反馈）。`done`（带可点的「知道了」）只在 `manual` 退化时出现：计划本是 `relaunch`，但助手没起来、宿主不会退出，这时才需要用户点一下收尾。`POST` 回包中断则落 `error`，如实说明「连接中断通常意味着确实在重启，刷新页面看看」，并给「重试」。
 - **弹窗定位**：两个面板（更新 / 重启）共用 `placeNear(anchor, wrap, width, minHeight)` —— 贴着触发按钮，**优先放按钮下方**，下方放不下（或不如上方宽裕）就翻到上方；水平夹在视口内；可用空间直接写成 `max-height` 让内容自己滚。`resize` 与 `scroll`（capture）经 rAF 合并后重排；**两个面板都不可拖动**：位置只有一个来源（触发它的那枚按钮），标题栏无移动光标。旧版更新面板支持拖拽并记忆位置，出现过「拖过一次就再也不跟按钮、不跟滚动」的问题（用户实测反馈），现已整段移除 —— 拖拽、`panelPinned`/`panelDragging` 状态、本地存储坐标全部不再存在。
+  - **0.1.8 修订：宽度/高度一律实测，别再相信调用方传的常量**。两个弹窗盒模型不同：Shadow DOM 里吃不到官方全局的 `box-sizing` 复位，`.rwrap` 是 content-box 且带 `12px` padding → 真实外框比 `RST_WIDTH=330` 多 **26px**，右缘比按钮多探出 26px；`.wrap` 没有 padding、只差 2px 边框，所以「检查更新」那个看着是齐的，问题被掩盖了很久（用户实测反馈「重启弹窗没跟按钮右侧对齐」才发现）。现在 `measuredBox()` 用 `getBoundingClientRect().width`（与锚点同一坐标系，页面带缩放也不串）当宽度、只拿不到时才退回常量，并从 `maxHeight` 里扣掉 `padding+border`。**以后给任一弹窗加 padding 不必再同步常量。**
+  - 同批修正：`room` 不再 `Math.max(120, …)`（按钮贴视口上下边时那会让弹窗连同底部按钮跑到视口外）；上下翻转的判据改用 `scrollHeight`（`offsetHeight` 会被上一次 `maxHeight` 夹住，反复重排时判据会漂）；重排的 scroll 监听用 `composedPath()` 过滤掉面板自身 `.rows` 的滚动（它不影响按钮位置）。
 - **颜色语义**：「立即重启」按钮（红描边 + 主题 `label-danger` 文字）与弹窗里的确认按钮都是红色 —— 它是本插件里唯一会打断进行中任务的动作；橙色留给「强制更新」，绿色只留给状态（已是最新 / 已更新 N 个的提示条）。
 - **UI**：与更新面板**分家**——重启有自己的 Shadow DOM 弹窗（`dshuiw-restart-panel-host`），按按钮的屏幕矩形定位在它下方；按钮本身挂到官方「已安装」标题行右侧（见下条），常带一圈绿色内描边。
 - **按钮位置**：找 `[data-plugin-panel] [data-plugin-group="bundles"]` 的第一个子元素＝「已安装」标题行（plugin-manager 用的同一个座位；标题是页面自己的 chrome，没有插槽席位），把 `span#dshuiw-list-actions` 塞进去靠 `margin-left:auto` 靠右；两个按钮的样式用 dsh 主题变量自绘（座位那一行没有官方按钮可当模子）。React 重渲染会抹掉手插节点，MO + 轮询兜底补挂。
 - **测试**（隔离，`%TEMP%\dshuiw-restart-test\`）：host 16/16 —— 四种方案判定、`manual` 不退出、助手失败不退出、`relaunch`/`shell` 恰在 400ms 后退出、5 条路由都注册、`local-plugins` 带 `dsh` 字段、非回环 403、PUT 405、GET 无副作用、POST 202（放子进程里跑，避免测试进程把自己重启）；client 51/51 —— 兼容门禁判定表（含等号边界、`1.10.0 > 1.9.9`、未声明/不认识/版本未知都不拦）、会话运行态（1 个/0 个/服务缺失/只列前 5）、弹窗各态渲染与转义（含 shell 两步说明、`manual` 不给重启按钮、**0 个会话仍要确认并写明不打断任务**）、**任何会话数下都不自动执行**（源码里倒计时相关标识全无）、**弹窗定位**（放得下就在按钮下方、放不下翻到上方、左右夹住、量不到按钮退回右上角、隐藏时不碰它）、接线（先 GET 方案、两个面板都走 `placeNear`、滚动/窗口重排、两个面板都不可拖动、**蒙皮开关与 20 秒兜底**、**Auto review 检测（auto/别的模式/无服务/binding 抛错/无投影五种情况）与提示条文案**、红色语义、按钮挂到 bundles 组、脚注、`dsh` 标签）。
-- **尚未真机端到端**：本仓库是 `link:` 装法，host 路由要**重启客户端**才加载，而重启会终结当前会话 —— 留给用户首次点击验证。
+  - **0.1.8 追加的验证**：`wireKeyActivation` 抽出来在 Node 里跑 5 组输入（Enter+按钮 / 空格+按钮 / Enter+非按钮 / 字母 / Tab）—— 只有前两组触发 click 且都 `preventDefault`，后三组不动；三处焦点环规则与 `KBD` 属性经源码断言存在；`placeNear` 用真实盒尺寸（346 无 padding / 356 带 12px padding）离线复算，两个弹窗右缘偏差均为 **0px**（改前 2px / 26px），外框高恰等于可用空间。
+- **真机覆盖情况（0.1.8 更新）**：面板的可视行为已由用户真机确认 —— 贴按钮右缘对齐、上下翻转、Tab 焦点环与焦点归位都点过了；`link:` 改动要重启才加载这条路径也反复走过（0.1.7→0.1.8 期间客户端重启多次）。**仍未被单独确证的一点**：由「重启 dsh」按钮触发的那条完整链条（点按钮 → 蒙皮 → 宿主退出 → 客户端弹官方「应用无法启动或已意外停止」对话框）。每次宿主退出都会生成 `crash-*-host.log`，但那份日志无法区分「按钮触发」与「手动退出客户端」；想钉死它只需真点一次。
+## 键盘与焦点（0.1.8 起）
+
+弹窗里的控件都是自绘 `<span>`（不是 `<button>`），可点性全靠鼠标 click 委托 —— 代价是键盘完全用不了：Tab 停不上去、回车/空格没反应，读屏也读不出「这是按钮」。这一轮的原则是**只补语义与键盘，不动渲染结构与 CSS**：
+
+- **`role="button" tabindex="0"`（`KBD` 常量）**加在每一处可点元素上：标签行 `.tag.clickable`、强制更新 `.fbtn.*`、头部 `.recheck`/`.allbtn`/`×`、重启弹窗 `.rbtn.*`。
+- **Enter/Space 走同一条委托**：`wireKeyActivation(wrap)` 在 `wrap` 上接一个 keydown，只对 `role="button"` 的元素生效，`preventDefault()`（Space 默认会滚页面）后派发一次 `click()` —— 键盘与鼠标共用同一套处理，不会长出第二套行为。
+- **焦点环用官方令牌，别自造颜色**：`app.asar` 里有 237 条 `:focus-visible`，主题变量是 `--dsw-focus-ring-width` / `--dsw-focus-ring-color`（回退 `--dsw-alias-state-business-primary`）。三处焦点环（更新面板与重启弹窗的 shadow 样式 + **页面级那两枚自绘按钮**）统一用它们，与原生控件同色同宽。**页面级按钮最容易漏** —— 官方全局样式管不到我们自己 `createElement` 出来的按钮，这正是「Tab 上去没反应/没有焦点环」的真因。
+- **焦点管理**：更新面板打开时焦点进面板（`.wrap` 带 `tabindex="-1"` + `role="dialog"`，非模态、页面仍可交互），`×`/Esc 收起后把焦点还给触发按钮（**点外部收起不还** —— 焦点已经跟着用户点的地方去了）；重启弹窗是 `role="dialog" aria-modal="true"`，在确认/失败/收尾态把焦点交给主按钮。判据必须用 `shadowRoot.activeElement`：`document.activeElement` 在 shadow DOM 里返回的是宿主，判不出「里面已经有焦点」，会导致每次重渲染都把焦点抢回主按钮。
+- **面板的显示权归「打开/收起」两条路径**：`paint()` 只重画内容，不再无条件 `wrap.hidden = false` —— 否则后台一有动静（装完一个包、冷静期到点自动重查、240s 超时兜底）就会把用户刚收起来的面板又弹回来；收起统一走 `closePanel(refocus)`（`×`/点外部/Esc 三处共用，`refocus` 区分要不要还焦点）。顺带：点自己那枚「检查更新」按钮不再算「外部」，消掉「按下先收起、抬起再展开」的闪动。
+
 ## 界面/布局改动的验证手法（0.1.6 起）
 
 面板是 Shadow DOM + 运行时拼字符串，肉眼看不出「差了几个像素」，靠猜会来回改。有效做法是**量出来**：
@@ -147,7 +161,8 @@
 - [x] 0.1.4：终态改读 `installBundle().value`（`waitForInstall` 只在信封失败时兜一次）；取消不再清空队列、排队项可单独取消；`checkNow` 回填 busy/queuing；失败原因（`error`/`packageResult`/`pendingBuilds`）落到面板；`enabled` 沿用清单里的真实状态。
 - [x] 0.1.5：新增「冷静期中」(cooling)——预判（全量 packument 的 `time`）+ 报错反推成熟时刻，标签不可点击安装、`enqueue` 二次拦截；host 半区新增 `minimumReleaseAgeExclude` 归并器与 `POST /api/ui-tweaks/normalize-excludes`（安装成功/重新检查时 fire-and-forget）；失败文案剥 ANSI、同一份 pnpm 输出去重、cooling 详情折叠；纠正 0.1.4 关于 `minimumReleaseAge` 的半个结论。
 - [x] 0.1.6：桌面客户端窗口记忆（预编译 DLL + PowerShell helper）；更新落地后头部常驻「重启生效」提示条；cooling 行默认一句话（`…才能更新（10-15 07:54 到期，点标签看详情）`）、完整解释与原始诊断收进点标签才展开的详情；cooling 到期自动重查；**强制更新（跳过冷静期）**——host 两条回环路由（预检 + 写生效豁免）、客户端三段式交互、`enqueue(name,{force:true})` 放行；预检发现别的包也会被拦时**直接拒绝并列出**；**装前成熟期硬闸**（`guardMaturity`，堵住「预判未返回时点『有新版本』可静默装未成熟版本」的漏，判定表隔离测试 10/10）；归并器/窗口 helper 的两个实测 bug 修复（最小化窗口断线跟踪、归位改「隐藏→移动→显示」）。
-- [ ] 0.1.7（待发布）：立即重启（模块 7，独立弹窗 + 会话运行态判断）、兼容门禁（`DSH 不符`）、按钮迁到「已安装」标题行右侧并自绘样式、面板加「只查第三方」脚注 —— 发布时同步 `package.json` 与 `lib/client.js` 的 BUILD、打 v0.1.7 tag；README / DEVELOPMENT 已按本次改动更新。
+- [x] 0.1.7（已发布 2026-10-16；npm 与 tag `v0.1.7` 一致）：立即重启（模块 7，独立弹窗 + 会话运行态判断）、兼容门禁（`DSH 不符`）、按钮迁到「已安装」标题行右侧并自绘样式、面板加「只查第三方」脚注。
+- [x] 0.1.8（已发布 2026-10-17 00:34，npm latest）：弹窗定位改实测外框（修掉重启弹窗右缘与高度各多 26px）、`room` 下限不再突破边距、重排判据与范围收窄；面板显示权归还「打开/收起」；蒙皮补 `inert` 与键盘滚动锁；弹窗控件补 `role/tabindex` + `Enter/Space` + 焦点环与焦点管理；README 补「桌面端自带 CLI 能管 profile」的例外。**遗留：tag `v0.1.8` 还没打**（本地与远端目前都只到 `v0.1.7`）。
 - [ ] 窗口记忆「零闪现」：唯一途径是常驻 watcher 进程（不属于 dsh 运行时、跨客户端重启存活、守在客户端启动前归位）；代价是后台常驻进程 + 卸载后残留需自清理。**待与用户确认是否接受这个代价**（用户倾向先继续讨论更优方案）。
 - [ ] cooling 预检可以更准：现在只扫直连依赖（importers 段）；传递依赖里若混进未成熟条目，只能靠安装失败时的反应式报错点名。若要覆盖全量 lockfile，得为几百个条目查发布时间（需要更狠的缓存/批量策略，或找 registry 的批量接口）。
 - [ ] cooling 预检（lockfile 成熟度扫描）：为「这次安装会不会被门禁拦下、被谁拦下」提供提前诊断；需拉 N 个包的发布时间，有耗时/缓存设计问题，建议与上面「强制更新」一起做。
