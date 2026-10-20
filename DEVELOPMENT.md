@@ -7,7 +7,7 @@
 - **已知坑**：注入、类名、data 标记、Shadow DOM 浮层。
 - **更新检查（模块 3）**：成熟期门禁与豁免表、cooling、强制更新、兼容门禁、Auto review。
 - **动画修复（模块 4）**：删 `prefers-reduced-motion` 规则 + `matchMedia` 门控。
-- **回合改动补位卡（模块 5）**：用会话日志里的 `meta.diffs` 重建回合尾卡、探测式补位、`tool/ptc-dispatch` 的 turn 归属。
+- **回合改动补位卡（模块 5）**：用会话日志里的 `meta.diffs` 重建回合尾卡、**必须实现 `buildLocationData` 才能被卡片读到**、补位条件是「官方那侧不会画」而非「探测到 404」、`tool/ptc-dispatch` 的 turn 归属。
 - **窗口记忆（模块 6，仅 host 半区）**：helper + 预编译 DLL、宿主识别、编码坑、360 误报。
 - **立即重启（模块 7）**：三模式判定、会话运行态、蒙皮、弹窗定位。
 - **其余**：键盘与焦点、界面验证手法、迁移、待办、发布。
@@ -102,8 +102,10 @@
   - `ctx.uiConversation.events.register({ kind, match, start, update })`：`match(event) → {id, role:"start"|"update"}`，`id` 只是分组键（官方用 `String(turn)`）；`update(context, match)` 第一个参数带 `.state`，**`match.event` 才是事件**（把 match 当事件读会全空）；返回值经 `requireState` 校验，**不能 undefined**。
   - 槽位：`ctx.slots.register({ name:"conversation.chat.turnTail", id, order, inject }, Component)` —— 契约 `kind:"list"`，现有 deliverables / plan(order 20) / schedule 三家，我们取 **order 30**。
   - 卡片 props：`{ turn, seq, openFile, sessionId, t, …hooks }`；**Definition 的状态用 `props.turn.data.get(kind)` 读**（deliverables 的 `changesForClosing` 就是这么取）。
+  - ⚠️ **那份状态必须由本 Definition 自己发布**：装配器只为实现了 **`buildLocationData(context, scope, previous)`** 的 Definition 发布 Turn 作用域数据（`dsh-client-ui-conversation` 的 `buildLocationData` → `replaceLocationData` / `applyDirtyLocationData` → `locationIndex` 的 `MutableLocationDataStore`），而 `turn.data.get(key)` 返回的正是发布项里的 `value`。发布项还必须满足 `data.kind === scope`、`data.key === 本 Definition 的 kind`（不符装配器**直接抛错**）、`data.turn` 为安全整数 —— 所以取不到 `turn` 时返回 `null` 而不是硬发。**0.2.0 漏了这一步：`state` 恒为 `null`，卡片一次都没画出来**。离线 harness 当时把 `turn.data.get` 直接桩掉了，所以 31/31 是假通过；0.2.1 起注册前显式校验 `changesDefinition().buildLocationData` 存在，否则 guard 报错。
+  - 顺带一个性能约定：`buildLocationData` 在状态未变时**返回入参 `previous` 本身**，装配器据此判定「未变化」而跳过重发布（否则每回合重绘一次卡片子树）。
 - **嵌套调用的 turn 归属**：`tool/ptc-dispatch`（run_code 里的 edit/write）**没有 turn 字段**（只有 `rootCallId/parentCallId/subCallId` + `meta.diffs`），用 `tool/call`（有 `turn`/`callId`）建 `rootCallId → turn` 映射挂回去。前端**收得到** ptc 事件（`dsh-client-ui-chat`/`tool`/`plan` 都在匹配它），否则本模块会漏掉绝大多数改动。
-- **探测式补位**：`GET api/changes.summary?sessionId=…&seq=<workspace/changes 的 seq>`（**文档相对**，无前导斜杠；官方 `changesSummaryUrl` 同形）。**200 → 不画**（让位官方卡）；**只有 404 才画**；401/其它状态/网络异常一律不画 —— 宁可漏补，不可误补出双份。
+- **补位条件（0.2.1 修）**：先判断「官方那侧会不会画」= `configForms.developerTools.enabled`（设置项**「显示编码工具视图」**，正是官方卡注入的 `showCodeDiff`）**且**该回合有 `workspace/changes` 公告（`seq` 非 null）。缺任一个 → 官方一定不画，**直接补位、不发探测**；两者都满足 → 才探测 `GET api/changes.summary?sessionId=…&seq=<公告 seq>`（**文档相对**，无前导斜杠；官方 `changesSummaryUrl` 同形），**200 → 不画**（让位官方卡），**只有 404 才画**，401/其它状态/网络异常一律不画 —— 宁可漏补，不可误补出双份。0.2.0 只看 404，于是「开关关着」时两边都不画（全空白）。开关 store 用 `ctx.inject(["configForms"], …)` 取，拿不到就按「可能开着」走探测（与 0.2.0 同行为，不会多出卡）。
 - **缓存策略**：探测结果只缓存在**本次连接**内，`connection/reset` 清空。官方自己永久缓存 missing（`{failed:"missing", retryable:()=>false}`），那会在宿主恢复或探测期误判后留下双份卡且**无法自愈**。
 - **同文件多次改动**：按 old→new 链折成一份净变化（后段 `oldText` 应等于前段 `newText`）；链断则分段显示并分别计数，不报错。
 - **边界**：只覆盖文件工具；pwsh / npm 等造成的改动进不来（只有官方卡含）。已释放的旧会话**不需要回填** —— 日志在磁盘上就能立刻重建（这是选 A 而非自己持久化的最大理由）。
@@ -186,6 +188,7 @@
 - [x] 0.1.7（2026-10-16，tag `v0.1.7`）：立即重启（模块 7）、兼容门禁（`DSH 不符`）、按钮迁到「已安装」标题行、脚注。
 - [x] 0.1.8（2026-10-17 00:34，npm latest）：弹窗定位实测外框（26px）、`room` 下限、重排判据；面板显示权归还「打开/收起」；蒙皮补 `inert` 与键盘滚动锁；控件补 `role/tabindex` + `Enter/Space` + 焦点环；README 补自带 CLI 例外。tag `v0.1.8`（`8aed2bc`）。
 - [x] 0.2.0（2026-10-18）：回合改动补位卡（模块 5）—— 用会话日志里的 `meta.diffs` 重建回合尾卡、探测式补位（只在官方 404 时画）、`tool/ptc-dispatch` 的 turn 归属、缓存随连接重置。离线 31/31；**真机待验证**（刷新客户端 → 跑一轮改文件的对话 → 切走再切回 / 重启后重开，看卡是否仍在且不重复）。
+- [x] 0.2.1（2026-10-20）：修 0.2.0 补位卡「一次都没画出来」—— ① 补 `buildLocationData`（缺它则 `turn.data.get(kind)` 恒空）+ 注册前显式校验 + 未变化时复用 `previous`；② 补位条件从「探测到 404」改为「官方那侧不会画」（`developerTools.enabled` 关 / 该回合无公告 → 直接补位且不探测；开关开且有公告 → 才探测，非 404 不画）。③「自动审查」提醒条文案 150+ 字压到 59 字（只留「装插件会失败 / 调用会被拦」+ 动作），README 同段一并压缩。离线 harness（真 `client.js` + 假 ModuleLoader/React/slots）**21/21**（`node .dsh-tmp/check-ui-tweaks-changes.mjs`，脚本待并入仓库）；**真机待验证**：重启客户端 → 重开一个已释放的旧会话，旧回合应当有重建卡（小字口径行）且与活会话中的官方卡不重复。
 - [ ] `shell` 模式重启不留日志（`ui-tweaks-restart.log` 只有 `relaunch` 分支写），要硬证据就在 `performRestart` 退出前追加一行；「点按钮 → 宿主退出」目前只有 `crash-*-host.log` 作间接证据。
 - [ ] 窗口记忆「零闪现」只能靠常驻 watcher 进程（代价：常驻 + 卸载残留），**待与用户确认**。
 - [ ] cooling 预检更准：现在只扫 importers 直连依赖，传递依赖靠反应式报错兜底；要覆盖全量 lockfile 得有更狠的缓存/批量策略。
