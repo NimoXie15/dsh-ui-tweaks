@@ -1,7 +1,7 @@
 {
   "name": "@nimoxie/dsh-ui-tweaks",
   "version": "0.2.1",
-  "description": "dsh Web UI 微调合集：宽表格越界修复、对话区左侧自绘滚动条、插件更新检查面板（不含 dsh 本体）",
+  "description": "dsh Web UI 微调合集：回合尾「本回合改动」卡在会话释放后仍按官方样式显示（用会话日志重建数据喂给官方卡）、宽表格越界修复、对话区左侧自绘滚动条、动画修复、插件更新检查面板、桌面端窗口记忆（不含 dsh 本体）",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

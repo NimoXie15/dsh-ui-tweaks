@@ -111,6 +111,28 @@
 - **边界**：只覆盖文件工具；pwsh / npm 等造成的改动进不来（只有官方卡含）。已释放的旧会话**不需要回填** —— 日志在磁盘上就能立刻重建（这是选 A 而非自己持久化的最大理由）。
 - **验证**：离线 harness（`%TEMP%\dshuiw-changes-test\test-changes.cjs`，vm + React/DOM 桩）**31/31** —— Definition 聚合与 turn 归属、链式合并、折叠/展开渲染与计数、200 让位、401 不画、fetch 抛异常不崩、链断降级、服务缺失只 warn 不拖垮其它模块、React 缺失不注册槽位。**真机待验证**。
 
+## 官方改动卡数据适配层（模块 5b，0.2.1 起）
+
+- **为什么**：官方那张卡的 summary/diff 只活在 Host 的 Session 内存里，会话一释放就 404，卡直接不画。而它只要 `response.ok` + 形状合法，**不问数据来源**（`HostReadStore.read` 就是一句 `fetch(url, { signal })`，deliverables client.js:208）。所以这一版不再画卡，改成**喂数据**：官方组件原生渲染，卡头 / hover 预览 / 右侧 Review 全是官方的。
+- **怎么喂**：幂等包装 `window.fetch`，只认 `/api/changes.summary` 与 `/api/changes.diff`，且只对索引里存在的 `(sessionId, seq)` 回合成 200；其它请求一律 `original.apply(this, arguments)` 透传；`ctx.effect` 里 yield 卸载函数还原原 fetch。
+- **时序（最容易踩）**：坐标必须在官方组件发请求**之前**进索引。官方在 `useEffect` 里发请求，而 React 先跑完所有 slot 的 render 再跑 effect —— 所以登记放在卡片**渲染期**（`registerChangesCoordinates`），放 effect 里就是竞态。
+- **turn 从哪来**：Definition 发布的状态只有 `{seq, files}`，轮号在 slot props 的 `owner.turn.turn`（TurnLocation）。官方 validator 要求 `turn` 是 ≥1 整数，取不到就**不拦**——宁可不补，也不能发非法形状。
+- **形状**：`summary = {turn, files:[{path,display,added,deleted}], total, added, deleted}`；`diff = {kind:"text", path, display, before, after, coarse, hunks:[{oldStart,oldLines,newStart,newLines,lines}]}`，hunk 按 3 行上下文切、行号 1 基、每行带 `+`/`-`/空格 前缀、单文件上限 2000 行。
+- **口径差异（有意为之）**：官方是回合首末**净变化**，旧自画卡是**分段累加**（链断时按段计），同一轮数字会不同（实测 +16 −13 vs +2 −12）。要官方外观就走官方口径。
+- **display**：按官方规范取相对 cwd 的路径；**家目录 `~` 归一化暂缺**（客户端拿不到 home），仓库外文件退化为绝对路径，只影响观感、不影响校验。
+- **验证**：`node .dsh-tmp/check-adapter.mjs` —— 真 `client.js` + 假 ModuleLoader/React/slots/sessions + **官方 4 个 validator**，16 项（summary/diff 形状、净变化计数、hunk 行号与上下文、index 越界透传、跨会话/跨 seq/无关路由不拦、卸载复原）；另有真机验证：旧会话 `session-11fed76a` turn 57（seq 3156）官方卡与右侧 Review 均正常，旧卡自动让位。
+
+### 自画卡的定位（切片 2 之后）
+
+- **只在两种情形画**：编码视图关、无公告。其余情形一律让官方卡渲染，本卡不抢。
+- **骨架照官方**：60px 卡头 + 40×40 图标块（自绘 chevron-code SVG）+ 标题（单文件用 basename，多文件「已编辑 N 个文件」）+ 千分位统计；**多于 4 个文件**才出「全部 N 个」，点了只展开**列表**，绝不展开 diff（官方也只展开列表）。
+- **类名不硬编码**：运行时从官方注入的 `<style data-plugin-css$="ChangedFiles.module.css">` 里正则取 hash 前缀（`\.([A-Za-z0-9_-]{4,12})_card`），再拼 `_card/_header/_list/_row/...`；读不到就退回内置近似样式 `CHANGES_FALLBACK_STYLES`（只影响观感，不影响结构）。
+- **数据复用 5b 入口**：卡片直接读 `changesEntryFor(sid, seq)` 的 files（同一份净变化与 hunk），保证卡上的数字与喂给官方卡的那份永远一致，不另算一套。
+- **点击 = 打开官方 Review**：`sidebarRight.openResource("dsh-resource://changes-review/session/<sid>/<seq>/<turn>", { params: { index } })`。**无公告的回合用合成坐标 `seq = 0`**，同时把 `sid:0` 登记进 5b 索引，Review 面板的取数就有着落。
+- **hover 迷你 diff**：500ms 延迟；浮层用 `position: fixed`（卡片带 `overflow:hidden`，绝对定位会被裁），只画 `+`/`-`/上下文行（官方预览里同样隐藏 hunk 头）。
+- **小字规则**：无公告 → 卡内底部一行 11px 可见小字 + `title`；编码视图关 → 只走 `title`，不破坏与官方的一致性。
+- **hover 预览与官方对齐**：行号单列（删除行给旧行号、新增行给新行号、上下文行给新行号）、改动行淡底色（绿/红 16%）、左侧 2px 色条、`white-space: pre` 不换行（长行横向滚动）、hunk 之间留 6px 分隔。
+
 ## 窗口记忆（模块 6，仅 host 半区）
 
 官方桌面客户端主窗口写死 1280×820 居中、主进程无窗口状态持久化（app.asar 里 `createWindow` 无 placement）；渲染层 `contextIsolation+sandbox`、`dshDesktop` 桥只给 `dsh-app://app` 主框架。故走**进程外**：host 半区 spawn 隐藏 PowerShell helper（`lib/window-helper.ps1`），Win32 互操作来自 `lib/window-helper.cs` 预编译的 `window-helper.dll`（装到 profile 的 `ui-tweaks/`）。
@@ -188,7 +210,7 @@
 - [x] 0.1.7（2026-10-16，tag `v0.1.7`）：立即重启（模块 7）、兼容门禁（`DSH 不符`）、按钮迁到「已安装」标题行、脚注。
 - [x] 0.1.8（2026-10-17 00:34，npm latest）：弹窗定位实测外框（26px）、`room` 下限、重排判据；面板显示权归还「打开/收起」；蒙皮补 `inert` 与键盘滚动锁；控件补 `role/tabindex` + `Enter/Space` + 焦点环；README 补自带 CLI 例外。tag `v0.1.8`（`8aed2bc`）。
 - [x] 0.2.0（2026-10-18）：回合改动补位卡（模块 5）—— 用会话日志里的 `meta.diffs` 重建回合尾卡、探测式补位（只在官方 404 时画）、`tool/ptc-dispatch` 的 turn 归属、缓存随连接重置。离线 31/31；**真机待验证**（刷新客户端 → 跑一轮改文件的对话 → 切走再切回 / 重启后重开，看卡是否仍在且不重复）。
-- [x] 0.2.1（2026-10-20）：修 0.2.0 补位卡「一次都没画出来」—— ① 补 `buildLocationData`（缺它则 `turn.data.get(kind)` 恒空）+ 注册前显式校验 + 未变化时复用 `previous`；② 补位条件从「探测到 404」改为「官方那侧不会画」（`developerTools.enabled` 关 / 该回合无公告 → 直接补位且不探测；开关开且有公告 → 才探测，非 404 不画）。③「自动审查」提醒条文案 150+ 字压到 59 字（只留「装插件会失败 / 调用会被拦」+ 动作），README 同段一并压缩。离线 harness（真 `client.js` + 假 ModuleLoader/React/slots）**21/21**（`node .dsh-tmp/check-ui-tweaks-changes.mjs`，脚本待并入仓库）；**真机待验证**：重启客户端 → 重开一个已释放的旧会话，旧回合应当有重建卡（小字口径行）且与活会话中的官方卡不重复。
+- [x] 0.2.1（2026-10-20）：修 0.2.0 补位卡「一次都没画出来」—— ① 补 `buildLocationData`（缺它则 `turn.data.get(kind)` 恒空）+ 注册前显式校验 + 未变化时复用 `previous`；② 补位条件从「探测到 404」改为「官方那侧不会画」（`developerTools.enabled` 关 / 该回合无公告 → 直接补位且不探测；开关开且有公告 → 才探测，非 404 不画）。③「自动审查」提醒条文案 150+ 字压到 59 字（只留「装插件会失败 / 调用会被拦」+ 动作），README 同段一并压缩。④ 新增**模块 5b 数据适配层**：包装 `window.fetch`，把会话日志重建的 summary/diff 顶给官方卡，于是已释放会话里由**官方组件原生渲染**（含 hover 预览与右侧 Review），我们自己那张卡自动让位；离线 16/16（`node .dsh-tmp/check-adapter.mjs`）+ 真机通过（`session-11fed76a` turn 57：官方卡、Review split 视图、开口文件按钮均正常，无双份）。离线 harness（真 `client.js` + 假 ModuleLoader/React/slots）**21/21**（`node .dsh-tmp/check-ui-tweaks-changes.mjs`，脚本待并入仓库）；真机通过（旧会话 `session-11fed76a` turn 57：官方卡 + 右侧 Review 全部正常，旧卡自动让位）。⑤ 自画卡只服务两种兜底（编码视图关 / 无公告）：骨架照官方（60px 卡头 / 图标块 / 千分位统计 / 4 行折叠 / hover 迷你 diff / 点击开官方 Review），删掉内联展开与「第 N 段改动」文案，无公告用合成 `seq=0` 走官方 Review；两个离线 harness 21/21 + 16/16 全绿。⑥ hover 迷你 diff 补官方观感（行号列 / 改动行底色 / 左侧色条 / 不换行横向滚动），并清掉切片后失效的 4 个死函数（`shortPath` / `foldParts` / `countParts` / `DIFF_ROW_LIMIT`）。
 - [ ] `shell` 模式重启不留日志（`ui-tweaks-restart.log` 只有 `relaunch` 分支写），要硬证据就在 `performRestart` 退出前追加一行；「点按钮 → 宿主退出」目前只有 `crash-*-host.log` 作间接证据。
 - [ ] 窗口记忆「零闪现」只能靠常驻 watcher 进程（代价：常驻 + 卸载残留），**待与用户确认**。
 - [ ] cooling 预检更准：现在只扫 importers 直连依赖，传递依赖靠反应式报错兜底；要覆盖全量 lockfile 得有更狠的缓存/批量策略。
