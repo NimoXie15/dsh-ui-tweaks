@@ -8,6 +8,7 @@
 - **更新检查（模块 3）**：成熟期门禁与豁免表、cooling、强制更新、兼容门禁、Auto review。
 - **动画修复（模块 4）**：删 `prefers-reduced-motion` 规则 + `matchMedia` 门控。
 - **回合改动补位卡（模块 5）**：用会话日志里的 `meta.diffs` 重建回合尾卡、**必须实现 `buildLocationData` 才能被卡片读到**、补位条件是「官方那侧不会画」而非「探测到 404」、`tool/ptc-dispatch` 的 turn 归属。
+- **官方改动卡数据适配层（模块 5b）**：包装 `window.fetch`，把日志重建的 summary/diff 喂给官方卡；坐标必须在渲染期登记（先 render 后 effect）；其它请求一律透传、可卸载。
 - **窗口记忆（模块 6，仅 host 半区）**：helper + 预编译 DLL、宿主识别、编码坑、360 误报。
 - **立即重启（模块 7）**：三模式判定、会话运行态、蒙皮、弹窗定位。
 - **其余**：键盘与焦点、界面验证手法、迁移、待办、发布。
@@ -109,7 +110,7 @@
 - **缓存策略**：探测结果只缓存在**本次连接**内，`connection/reset` 清空。官方自己永久缓存 missing（`{failed:"missing", retryable:()=>false}`），那会在宿主恢复或探测期误判后留下双份卡且**无法自愈**。
 - **同文件多次改动**：按 old→new 链折成一份净变化（后段 `oldText` 应等于前段 `newText`）；链断则分段显示并分别计数，不报错。
 - **边界**：只覆盖文件工具；pwsh / npm 等造成的改动进不来（只有官方卡含）。已释放的旧会话**不需要回填** —— 日志在磁盘上就能立刻重建（这是选 A 而非自己持久化的最大理由）。
-- **验证**：离线 harness（`%TEMP%\dshuiw-changes-test\test-changes.cjs`，vm + React/DOM 桩）**31/31** —— Definition 聚合与 turn 归属、链式合并、折叠/展开渲染与计数、200 让位、401 不画、fetch 抛异常不崩、链断降级、服务缺失只 warn 不拖垮其它模块、React 缺失不注册槽位。**真机待验证**。
+- **验证**：离线 harness（`%TEMP%\dshuiw-changes-test\test-changes.cjs`，vm + React/DOM 桩）**31/31** —— Definition 聚合与 turn 归属、链式合并、折叠/展开渲染与计数、200 让位、401 不画、fetch 抛异常不崩、链断降级、服务缺失只 warn 不拖垮其它模块、React 缺失不注册槽位。但该 harness **把 `turn.data.get` 桩掉了**，所以没暴露 0.2.0「卡片一次都没画出来」的缺陷；0.2.1 补上 `buildLocationData` 后另有 21/21（见文末 0.2.1 条），并已真机验证。
 
 ## 官方改动卡数据适配层（模块 5b，0.2.1 起）
 
@@ -120,7 +121,7 @@
 - **形状**：`summary = {turn, files:[{path,display,added,deleted}], total, added, deleted}`；`diff = {kind:"text", path, display, before, after, coarse, hunks:[{oldStart,oldLines,newStart,newLines,lines}]}`，hunk 按 3 行上下文切、行号 1 基、每行带 `+`/`-`/空格 前缀、单文件上限 2000 行。
 - **口径差异（有意为之）**：官方是回合首末**净变化**，旧自画卡是**分段累加**（链断时按段计），同一轮数字会不同（实测 +16 −13 vs +2 −12）。要官方外观就走官方口径。
 - **display**：按官方规范取相对 cwd 的路径；**家目录 `~` 归一化暂缺**（客户端拿不到 home），仓库外文件退化为绝对路径，只影响观感、不影响校验。
-- **验证**：`node .dsh-tmp/check-adapter.mjs` —— 真 `client.js` + 假 ModuleLoader/React/slots/sessions + **官方 4 个 validator**，16 项（summary/diff 形状、净变化计数、hunk 行号与上下文、index 越界透传、跨会话/跨 seq/无关路由不拦、卸载复原）；另有真机验证：旧会话 `session-11fed76a` turn 57（seq 3156）官方卡与右侧 Review 均正常，旧卡自动让位。
+- **验证**：离线 harness `.dsh-tmp/check-adapter.mjs`（临时脚本，未入库）—— 真 `client.js` + 假 ModuleLoader/React/slots/sessions + **官方 4 个 validator**，16 项（summary/diff 形状、净变化计数、hunk 行号与上下文、index 越界透传、跨会话/跨 seq/无关路由不拦、卸载复原）；真机已在旧会话 `session-11fed76a` turn 57（seq 3156）验证：官方卡与右侧 Review 均正常，旧卡自动让位。
 
 ### 自画卡的定位（切片 2 之后）
 
@@ -210,7 +211,7 @@
 - [x] 0.1.7（2026-10-16，tag `v0.1.7`）：立即重启（模块 7）、兼容门禁（`DSH 不符`）、按钮迁到「已安装」标题行、脚注。
 - [x] 0.1.8（2026-10-17 00:34，npm latest）：弹窗定位实测外框（26px）、`room` 下限、重排判据；面板显示权归还「打开/收起」；蒙皮补 `inert` 与键盘滚动锁；控件补 `role/tabindex` + `Enter/Space` + 焦点环；README 补自带 CLI 例外。tag `v0.1.8`（`8aed2bc`）。
 - [x] 0.2.0（2026-10-18）：回合改动补位卡（模块 5）—— 用会话日志里的 `meta.diffs` 重建回合尾卡、探测式补位（只在官方 404 时画）、`tool/ptc-dispatch` 的 turn 归属、缓存随连接重置。离线 31/31；**真机待验证**（刷新客户端 → 跑一轮改文件的对话 → 切走再切回 / 重启后重开，看卡是否仍在且不重复）。
-- [x] 0.2.1（2026-10-20）：修 0.2.0 补位卡「一次都没画出来」—— ① 补 `buildLocationData`（缺它则 `turn.data.get(kind)` 恒空）+ 注册前显式校验 + 未变化时复用 `previous`；② 补位条件从「探测到 404」改为「官方那侧不会画」（`developerTools.enabled` 关 / 该回合无公告 → 直接补位且不探测；开关开且有公告 → 才探测，非 404 不画）。③「自动审查」提醒条文案 150+ 字压到 59 字（只留「装插件会失败 / 调用会被拦」+ 动作），README 同段一并压缩。④ 新增**模块 5b 数据适配层**：包装 `window.fetch`，把会话日志重建的 summary/diff 顶给官方卡，于是已释放会话里由**官方组件原生渲染**（含 hover 预览与右侧 Review），我们自己那张卡自动让位；离线 16/16（`node .dsh-tmp/check-adapter.mjs`）+ 真机通过（`session-11fed76a` turn 57：官方卡、Review split 视图、开口文件按钮均正常，无双份）。离线 harness（真 `client.js` + 假 ModuleLoader/React/slots）**21/21**（`node .dsh-tmp/check-ui-tweaks-changes.mjs`，脚本待并入仓库）；真机通过（旧会话 `session-11fed76a` turn 57：官方卡 + 右侧 Review 全部正常，旧卡自动让位）。⑤ 自画卡只服务两种兜底（编码视图关 / 无公告）：骨架照官方（60px 卡头 / 图标块 / 千分位统计 / 4 行折叠 / hover 迷你 diff / 点击开官方 Review），删掉内联展开与「第 N 段改动」文案，无公告用合成 `seq=0` 走官方 Review；两个离线 harness 21/21 + 16/16 全绿。⑥ hover 迷你 diff 补官方观感（行号列 / 改动行底色 / 左侧色条 / 不换行横向滚动），并清掉切片后失效的 4 个死函数（`shortPath` / `foldParts` / `countParts` / `DIFF_ROW_LIMIT`）。
+- [x] 0.2.1（2026-10-20）：① 修 0.2.0 补位卡「一次都没画出来」—— 补 `buildLocationData`（缺它则 `turn.data.get(kind)` 恒空）、注册前显式校验、状态未变时复用 `previous`。② 补位条件从「探测到 404」改为「官方那侧不会画」：`developerTools.enabled` 关 / 该回合无公告 → 直接补位且不探测；两者都满足才探测，非 404 不画。③「自动审查」提醒条文案 150+ 字压到 59 字，README 同段一并压缩。④ 新增**模块 5b 数据适配层**：包装 `window.fetch` 把日志重建的 summary/diff 顶给官方卡，已释放会话改由官方组件原生渲染（hover 预览、右侧 Review 都是官方的），自画卡自动让位。⑤ 自画卡只服务两种兜底（编码视图关 / 无公告）：骨架照官方（60px 卡头、图标块、千分位统计、4 行折叠、hover 迷你 diff、点击开官方 Review），删掉内联展开与「第 N 段改动」文案，无公告用合成 `seq=0` 走官方 Review。⑥ hover 迷你 diff 补官方观感（行号列 / 改动行底色 / 左侧色条 / 不换行横向滚动）；清掉切片后失效的 4 个死函数（`shortPath` / `foldParts` / `countParts` / `DIFF_ROW_LIMIT`）。⑦ 验证：离线 harness **21/21**（`check-ui-tweaks-changes.mjs`）+ **16/16**（`check-adapter.mjs`，两个脚本都在 `.dsh-tmp/`，未入库）；真机通过（旧会话 `session-11fed76a` turn 57：官方卡 + 右侧 Review 正常，无双份）。
 - [ ] `shell` 模式重启不留日志（`ui-tweaks-restart.log` 只有 `relaunch` 分支写），要硬证据就在 `performRestart` 退出前追加一行；「点按钮 → 宿主退出」目前只有 `crash-*-host.log` 作间接证据。
 - [ ] 窗口记忆「零闪现」只能靠常驻 watcher 进程（代价：常驻 + 卸载残留），**待与用户确认**。
 - [ ] cooling 预检更准：现在只扫 importers 直连依赖，传递依赖靠反应式报错兜底；要覆盖全量 lockfile 得有更狠的缓存/批量策略。
