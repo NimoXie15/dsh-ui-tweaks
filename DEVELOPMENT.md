@@ -5,17 +5,17 @@
 **导读**：维护者笔记；每条「坑」都给成因与对策。
 - **骨架 / 本地开发**：文件构成、四处须同步的标识、`file:` vs `link:`、装卸与刷新。
 - **已知坑**：注入、类名、data 标记、Shadow DOM 浮层。
-- **更新检查（模块 3）**：成熟期门禁与豁免表、cooling、强制更新、兼容门禁、Auto review。
+- **更新检查（模块 3）**：成熟期门禁与豁免表、cooling、强制更新、豁免到期清理、兼容门禁、Auto review。
 - **动画修复（模块 4）**：删 `prefers-reduced-motion` 规则 + `matchMedia` 门控。
 - **回合改动补位卡（模块 5）**：用会话日志里的 `meta.diffs` 重建回合尾卡、**必须实现 `buildLocationData` 才能被卡片读到**、补位条件是「官方那侧不会画」而非「探测到 404」、`tool/ptc-dispatch` 的 turn 归属。
-- **官方改动卡数据适配层（模块 5b）**：包装 `window.fetch`，把日志重建的 summary/diff 喂给官方卡；坐标必须在渲染期登记（先 render 后 effect）；其它请求一律透传、可卸载。
+- **改动卡数据/动作适配层（模块 5b）**：包 `window.fetch` 把日志重建的 summary/diff 喂给官方卡（坐标在渲染期登记）；会话释放后 `/api/changes.open` 的「打开 / 显示位置 / 打开方式」由 host 复用官方 `dsh-native-command` 补位。
 - **窗口记忆（模块 6，仅 host 半区）**：helper + 预编译 DLL、宿主识别、编码坑、360 误报。
 - **立即重启（模块 7）**：三模式判定、会话运行态、蒙皮、弹窗定位。
 - **其余**：键盘与焦点、界面验证手法、迁移、待办、发布。
 
 ## 骨架（与 dsh-model-organizer 同构）
 
-- `lib/index.js`：host 半区五条回环路由：`GET /api/ui-tweaks/local-plugins`（本地来源/DSH 版本，含 `dsh` 字段）、`POST /api/ui-tweaks/normalize-excludes`（豁免表归并）、`POST precheck-exempt` / `POST force-exempt`（预检/写豁免）、`GET|POST /api/ui-tweaks/restart`（立即重启）；加载时静默归并一次。
+- `lib/index.js`：host 半区 8 条回环路由（统一前缀 `/api/ui-tweaks/`）：`GET local-plugins`（本地来源清单 + DSH 版本）、`POST normalize-excludes`（豁免表归并）、`POST precheck-exempt` / `POST force-exempt`（预检 / 写豁免）、`POST schedule-exempt-cleanup`（豁免到期自动删）、`POST open-path`（打开 / 显示位置 / 用指定应用打开；`action:"probe"` 只诊断不弹窗）、`POST open-apps`（系统关联应用列表）、`GET|POST restart`（立即重启）；加载时静默归并一次豁免表。
 - `lib/client.js`：浏览器半区，`module.exports = { name, apply, inject }`；`apply(ctx)` 由客户端 cordis 调用。
 - `cordis.patch.yml`：`- insert: [{id: ui-tweaks, name: '@nimoxie/dsh-ui-tweaks'}]`。**profile 必须声明 `dsh.bundle.patch`，否则启动报 declares no dsh.bundle**；**`insert.name` 必须写全 scope**。
 - `package.json`：`exports["./client"]` 指 client bundle；`dsh.client.platform: "web"`；inject 只需 `@deepseek-ai/dsh-api-remotes`（提供 `remote.*`）；`react`/`react-dom` 是 shell 内置（PLATFORM_MODULES）。
@@ -56,7 +56,7 @@
   1. **精确版本 spec 装未成熟版本 → 成功**：pnpm 打印 `Added 1 entry to minimumReleaseAgeExclude in pnpm-workspace.yaml` 并自行写豁免表 → 0.1.5 的「写精确版本也救不了」只对**无污染 lockfile** 成立。
   2. **豁免表为空 + lockfile 含未成熟条目**：跑 `install`（无事可做）→ 开头校验、整体失败、**磁盘零改动**；**若安装有活要干，安装照常落地、门禁在结尾才报 exit 1**（T2b/T3c）→ 必须**先预检、拒绝在动手之前**；「先试一下看报什么错」会把 profile 留在「装上了但命令报错」的混乱态。
   3. **遮蔽语义确认**：`[陈旧条, 未成熟条]` 失败、`[未成熟条, 陈旧条]` 通过 → 写入必须把目标版本放**块内第一条**。
-  - 实现：host 两条回环路由 `POST /api/ui-tweaks/precheck-exempt`（只读预检）与 `POST /api/ui-tweaks/force-exempt`；`forceExemptVersion` 只动豁免段落（目标插块首、其余字节逐字节保留、备份＋renameSync＋写后重读校验；**有意突破**归并器「结果恒为子集」）；`precheckExempt` 只扫 **profile 直连依赖**（lockfile importers）＋发布时刻 10 分钟缓存，列出「未生效豁免且仍在窗口内」的包（传递依赖不扫，漏判靠安装失败时的反应式报错兜底）。客户端三段式：入口 → 预检 → 拦路者清单/二次确认 → 写豁免 → 安装；`enqueue(name, { force: true })` 是唯一放行冷却行的入口。
+  - 实现：host 侧新增 `POST /api/ui-tweaks/precheck-exempt`（只读预检）与 `POST /api/ui-tweaks/force-exempt`；`forceExemptVersion` 只动豁免段落（目标插块首、其余字节逐字节保留、备份＋renameSync＋写后重读校验；**有意突破**归并器「结果恒为子集」）；`precheckExempt` 只扫 **profile 直连依赖**（lockfile importers）＋发布时刻 10 分钟缓存，列出「未生效豁免且仍在窗口内」的包（传递依赖不扫，漏判靠安装失败时的反应式报错兜底）。客户端三段式：入口 → 预检 → 拦路者清单/二次确认 → 写豁免 → 安装；`enqueue(name, { force: true })` 是唯一放行冷却行的入口。
   - 验证：host 隔离 15/15（写入位置、字节保留、去重、预检筛选、目标跳过）；UI 渲染 9/9；真机路由 `precheck-exempt` 返回 `{ok:true,blocked:[]}`，`local-plugins` 正常。
 - **cooling 文案（0.1.6 定稿）**：列表默认只有**一句话**——`0.70.0 还需等待 10 小时 40 分才能更新（10-15 07:54 到期，点标签看详情）`。完整解释走 `coolingReasonText(detail, windowMs)`，**只在点「冷静期中」标签展开时渲染**（`.dtl`）：为什么等（dsh 的 24 小时策略讲成人话）→ 硬装的后果（连坐整个 profile，故不提供直接安装）→ 到点自动恢复 → 末尾附原始诊断（预检＝registry 记录，反应式＝pnpm 报错）。等待期已过 / 结束时间未知各有文案。换行由 `.why` 的 `white-space:pre-wrap` 呈现。
 - **到期自动重查（0.1.6）**：`scheduleCoolingRefresh(name, matureAt)` 给 cooling 行排到点（+3s 缓冲）的 `checkOne(name)` 定时器（按包名去重）；触发点＝`applyCoolingGuess` 落 cooling 后、`judge` 冷却分支落 cooling 后；上限（约 24.8 天）之外不排。
@@ -80,11 +80,19 @@
 - **`waitForInstall` 不是进度轮询器**（0.1.3 的理解是错的，正是「更新永远超时」的成因）：它只在**响应丢失后**恢复同一请求，请求不在活动中返回 `null` 且**已完成结果不保留**。装完再轮询只会空转到 240s 看门狗、丢掉真实结果。0.1.4 起只读 `res.value`，仅信封失败（`res.ok === false`）才恢复一次，仍 `null` 就报「未能确认」。
 - **终态判定读 `application`**：`applied` / `restart-required`（都算成功，后者提示重启）→ 回读版本；`cancelled` → 退回「有新版本」；`failed` → 标「更新失败」，把 `error.code`（译中文）+ `error.diagnostic` + `packageResult.kind/exitCode/output/logPath` + `pendingBuilds` + `failedAt` 写进行内 `why`（带 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` 时判 `cooling`，反推窗口记进会话复用）；`overridden` → 可重试；未知值按「结果未知」。
 - **回读版本是唯一成功判据**：`listBundles()` 里读到该行版本且**与安装前不同**才判「已是最新」。只用 `pluginManager.listBundles()`（`pluginInventory` 只有 `list()` 没有 `listBundles`，会造成假阳性）；清单短暂不可用时重试 3 次（1.5s）。基准 `busyBefore` 在 `startOne` 抓取。
-- **registry 比对在浏览器直连**：`registry.npmjs.org` 带 CORS *，逐包**串行** fetch `/latest`。代价：安装走 `.npmrc` 的 npmmirror，镜像未同步的新版本会「面板说有、装时报 no-matching-version」。
+- **registry 比对在浏览器直连**：`registry.npmjs.org` 带 CORS *，逐包**串行** fetch `/latest`（0.2.2 起 12 秒超时，见下条）。代价：安装走 `.npmrc` 的 npmmirror，镜像未同步的新版本会「面板说有、装时报 no-matching-version」。
 - **取消要分清对象**（0.1.4 修）：排队项取消只摘出自己（`cancelQueued`）；在装项取消才 `cancelInstall(requestId)`，且**保留队列**，落定后 `done() → pump()`。旧实现 `requestCancel` 一句 `queue = []` 清空全队列，导致「等待更新」的项全退回「有新版本」——这是「取消一项后其余项不更新」的成因。回值 `{status: cancelled|not-running|too-late}`。
 - **重新检查必须回填在飞状态**（0.1.4 修）：`checkNow` 重建 `rows` 会把「更新中/等待更新」抹成「有新版本」而 `busyName`/`queue` 还在，点那行撞上 `enqueue` 的 `name === busyName` 保护而**静默无反应**（「重新检查后无法更新」的成因）。修法：重建后立刻 `reconcileInstallStates()` 盖回 busy/queuing，这两种行不参与比对。
-- **总看门狗只是兜底**（0.1.4 起）：正常路径一次 `installBundle` 定案，不必等 240s；只覆盖 fetchLatest（fetch 无超时）这类异常分支。
+- **看门狗按「进度」而不是「总时长」判活**（0.2.2 修）：旧实现固定 240 秒、从调用开始计时；真机一次重链 44 个包的卸载跑了 **5 分 08 秒**就被误判超时。更糟的是判超时后立刻 `pump()` 下一项、旧请求还在跑，两条 pnpm 叠在 profile 锁上——表现就是「全都卡住」。现在：`ctx.remote.$on("plugin-manager/install-log|install-state|changed")` 当心跳（拿不到就退回纯计时）；无输出 90s 只在行内提示「仍在运行」；单项 15 分钟才判超时，判超时后仍等底层链收尾（最多再 5 分钟）才放行队列。放行闸是 `releaseBusy()`：`busyChainDone`（底层链收尾）+ `busyFinished`（终态已判定）同时成立，才清 busy 并 `pump()`。
+- **unknown 终态必须复查并回滚**（0.2.2 加）：判超时/结果未知且本次**中途卸载过**时，旧实现只写一句「请确认」，而后续「装回」那一步的结果会因为 `settled` 被丢弃 —— 真机上 `@linxin666/dsh-session-archive` 就是这样被卸掉后没装回来。现在 `recoverAfterUnknown()` 主动 `listBundles()` 复查：不在清单里就用 `busyBefore` 自动装回，并把结果写进行内文案。
+- **registry / host 请求必须有超时**（0.2.2 加）：`fetchLatest`（`/latest`）12 秒、host 来源名单 8 秒。比对是串行的，一个挂起的请求会让后面所有包永远停在「比对中 …」；`fetchLocalNames` 更靠前 —— 它不回调，整条比对链根本不会开始。
+- **清单里「装了但读不到」的行要带原因**（0.2.2 加）：`listBundles` 对读不到 `package.json` 的包仍会返回一行（带 `error`、没有 `version`），面板原来只显示「无法比对」。现在把 `error.code` / `availability: "missing"` 写进 `why`，悬停就能看出是文件缺失还是清单坏了。
+- **总看门狗只是兜底**（0.1.4 起，0.2.2 重写）：正常路径一次 `installBundle` 定案，不必等它；它只兜 fetch/网络这类异常分支。
 - **`enabled` 用清单真实状态**：传 `!(row.enabled === false)`，保留用户手动禁用（旧实现一律 `enabled: true`，会重新启用）。
+- **更新完仍是关闭的插件给一键启用**（0.2.2 加）：官方安装默认不启用（`installBundle` 的 `enabled` 默认 false），面板又刻意保留原状态，所以「原本关着的插件」更新完仍然关着。`finishOne` 回读清单时记下这次更新过、且 `enabled === false` 的名字（`updatedOff`），重启提示栏里长出一枚橙色按钮（`.fbtn.fgo`，与冷静期详情里的「强制更新」同款），点它**串行**调 `pluginManager.setBundleEnabled(name, true)`（官方插件页总开关同款 API）；成功即清标记，失败写红字并留按钮可重试。只动本次更新过的包，不碰用户没更新的插件。
+- **豁免表写 YAML 必须能过 pnpm 的解析器**（0.2.2 修）：`minimumReleaseAgeExclude` 里的 scoped 包名不能做 plain scalar —— `@scope/pkg@1.2.3` 裸写会让整个 `pnpm-workspace.yaml` 解析失败（`bad indentation of a sequence entry`），后果是 profile 里**所有** pnpm 操作（安装、卸载）全部 `operation-error`，面板只会显示「卸载被拒（operation-error）」，看不出真因。现在新条目统一经 `yamlScalar()` 输出（仅必要时加单引号、内部单引号翻倍），归并器还会顺手修复历史上写坏的行；客户端在卸载被拒时把 `error.diagnostic` / `packageResult.output` 首行 + 日志路径带进失败文案。
+- **强制更新的豁免要到期才删**（0.2.2 加）：pnpm 每次安装都拿**整个 lockfile** 校验供应链策略，被强制装上的版本还没满 24h 时删掉豁免，之后所有 pnpm 操作都会被整体拒绝（比留着更糟）。所以客户端在写豁免成功后调 `POST /api/ui-tweaks/schedule-exempt-cleanup` 登记「成熟时刻 +60s」；host 侧 `dropExemptVersion()` 到点删表项，清单落盘在 `profile/ui-tweaks/exempt-pending.json`，客户端重启后按记录重排（已到期的立刻删）；删失败保留记录、10 分钟后再试。
+- **面板滚动条参照对话区那条自绘滚动条**（0.2.2 加）：原生滚动条在 Windows 上会占列表 17px 宽，把行内容整体挤窄。面板列表隐藏原生条（`scrollbar-width:none` / `::-webkit-scrollbar{width:0}`），在 `.rowswrap` 右缘绝对定位 12px 轨道 + `.sbthumb`；视觉走 `.sbthumb::after`：`color-mix(in srgb,currentColor 36%,transparent)`，悬停/拖动加宽到 9px、60%（与模块 2 同一配方，颜色跟随主题文字色，不再靠容器 opacity）。**可拖动**：PointerCapture + 按下点偏移（不是拇指中心跳过来），点轨道先把拇指中心挪到点击处再顺势进入拖动；pointermove 同步写 `scrollTop`，`scroll` 事件回纠几何；轨道上滚轮转发给真容器。`paint()` 每次重画后 `bindSb()+syncSb()`（innerHTML 换过就重绑），resize/重排后补一次 `syncSb`。
 - **失败原因要可见**：`fail`/`unchanged`/`unconfirmed`/`error`/`cooling` 行下多渲染 `.why`（只放 `title` 悬停等于没显示）。0.1.5 起先 `stripAnsi`（CSI/OSC/控制字符/CRLF，否则首屏是 `鈺?` 残渣），`diagnostic` 与 `packageResult.output` 互相包含只留更完整的一份。
 
 ## 动画修复（模块 4）
@@ -130,6 +138,9 @@
 - **类名不硬编码**：运行时从官方注入的 `<style data-plugin-css$="ChangedFiles.module.css">` 里正则取 hash 前缀（`\.([A-Za-z0-9_-]{4,12})_card`），再拼 `_card/_header/_list/_row/...`；读不到就退回内置近似样式 `CHANGES_FALLBACK_STYLES`（只影响观感，不影响结构）。
 - **数据复用 5b 入口**：卡片直接读 `changesEntryFor(sid, seq)` 的 files（同一份净变化与 hunk），保证卡上的数字与喂给官方卡的那份永远一致，不另算一套。
 - **点击 = 打开官方 Review**：`sidebarRight.openResource("dsh-resource://changes-review/session/<sid>/<seq>/<turn>", { params: { index } })`。**无公告的回合用合成坐标 `seq = 0`**，同时把 `sid:0` 登记进 5b 索引，Review 面板的取数就有着落。
+- **动作补位（0.2.2）**：数据补上后 Review 能画 diff，但「显示文件位置 / 打开方式」走 `/api/changes.open`（GET 列应用 / POST 打开），它要先 `workspaceChanges.summary(sessionId, seq)` 才能把 `file.path` 解析成绝对路径 —— 会话释放即 404。适配层因此也拦这条：先走官方，只有 404 才补位（GET 交给 host 的 `open-apps`，POST 交给 `open-path`）。
+- **补位实现**：host 从 `resources/app.asar/dsh/...` 动态 import 官方 `@deepseek-ai/dsh-native-command`，应用列表用 `nativeFileApplications()`，动作走 `openNativePath` / `revealNativePath` / `openNativeFileApplication`；取不到模块才退回自带 `nativeOpenCommand()`（`explorer` / `explorer /select,<file-uri>`，URI 编码照官方 `explorerTarget`）。`action:"probe"` 只让子进程 echo，用来分清「子进程起不来」和「窗口被隐藏」。
+- **两条真机坑**：① 首次失败是 host 没重启（新路由未注册，回 401/404）；② GUI 启动器带 `windowsHide:true` 时窗口会继承隐藏、看起来像「点了没反应」——官方对 GUI 用 `windowsHide:false`，照抄。应用列表按官方口径**只列真实应用**（主按钮＝列表第一个应用），自造条目已删；枚举失败回空数组，控件退化成只有「显示文件位置」。
 - **hover 迷你 diff**：500ms 延迟；浮层用 `position: fixed`（卡片带 `overflow:hidden`，绝对定位会被裁），只画 `+`/`-`/上下文行（官方预览里同样隐藏 hunk 头）。
 - **小字规则**：无公告 → 卡内底部一行 11px 可见小字 + `title`；编码视图关 → 只走 `title`，不破坏与官方的一致性。
 - **hover 预览与官方对齐**：行号单列（删除行给旧行号、新增行给新行号、上下文行给新行号）、改动行淡底色（绿/红 16%）、左侧 2px 色条、`white-space: pre` 不换行（长行横向滚动）、hunk 之间留 6px 分隔。
@@ -212,6 +223,17 @@
 - [x] 0.1.8（2026-10-17 00:34，npm latest）：弹窗定位实测外框（26px）、`room` 下限、重排判据；面板显示权归还「打开/收起」；蒙皮补 `inert` 与键盘滚动锁；控件补 `role/tabindex` + `Enter/Space` + 焦点环；README 补自带 CLI 例外。tag `v0.1.8`（`8aed2bc`）。
 - [x] 0.2.0（2026-10-18）：回合改动补位卡（模块 5）—— 用会话日志里的 `meta.diffs` 重建回合尾卡、探测式补位（只在官方 404 时画）、`tool/ptc-dispatch` 的 turn 归属、缓存随连接重置。离线 31/31；**真机待验证**（刷新客户端 → 跑一轮改文件的对话 → 切走再切回 / 重启后重开，看卡是否仍在且不重复）。
 - [x] 0.2.1（2026-10-20）：① 修 0.2.0 补位卡「一次都没画出来」—— 补 `buildLocationData`（缺它则 `turn.data.get(kind)` 恒空）、注册前显式校验、状态未变时复用 `previous`。② 补位条件从「探测到 404」改为「官方那侧不会画」：`developerTools.enabled` 关 / 该回合无公告 → 直接补位且不探测；两者都满足才探测，非 404 不画。③「自动审查」提醒条文案 150+ 字压到 59 字，README 同段一并压缩。④ 新增**模块 5b 数据适配层**：包装 `window.fetch` 把日志重建的 summary/diff 顶给官方卡，已释放会话改由官方组件原生渲染（hover 预览、右侧 Review 都是官方的），自画卡自动让位。⑤ 自画卡只服务两种兜底（编码视图关 / 无公告）：骨架照官方（60px 卡头、图标块、千分位统计、4 行折叠、hover 迷你 diff、点击开官方 Review），删掉内联展开与「第 N 段改动」文案，无公告用合成 `seq=0` 走官方 Review。⑥ hover 迷你 diff 补官方观感（行号列 / 改动行底色 / 左侧色条 / 不换行横向滚动）；清掉切片后失效的 4 个死函数（`shortPath` / `foldParts` / `countParts` / `DIFF_ROW_LIMIT`）。⑦ 验证：离线 harness **21/21**（`check-ui-tweaks-changes.mjs`）+ **16/16**（`check-adapter.mjs`，两个脚本都在 `.dsh-tmp/`，未入库）；真机通过（旧会话 `session-11fed76a` turn 57：官方卡 + 右侧 Review 正常，无双份）。
+- [x] 0.2.2（2026-10-22）：修「全部更新全都卡住 / genui 无法比对」，顺带收掉更新与改动卡的边角。
+  - 看门狗改按「进度」判活：`install-log` / `install-state` / `changed` 当心跳，无输出 90s 只提示，单项 15 分钟才判超时；判超时也等底层链收尾（`releaseBusy()` 双闸）才放行队列。
+  - `unknown` 且中途卸载过 → `recoverAfterUnknown()` 复查清单并用原版本装回。
+  - `fetchLatest` 12s / `fetchLocalNames` 8s 超时，杜绝「比对中 …」永久挂起；`listBundles` 无版本的行显示 `error.code` / `availability: missing`。
+  - 真机现场：profile 曾被中断的 pnpm 操作掏空 44 个包，一次重链跑了 5 分 08 秒；`@linxin666/dsh-session-archive` 被卸后未装回，已手动恢复 0.4.8。
+  - 更新成功的关闭插件：重启提示栏出现「启用已更新的 N 个插件」，串行 `setBundleEnabled(name, true)`。
+  - `hostPost` / `hostGet` 全部带超时（force-exempt 超时自动重试一次，写豁免是幂等的），不再永久停在「正在写入豁免表…」。
+  - `yamlScalar()`：scoped 包名写豁免表必须加引号，否则 `pnpm-workspace.yaml` 解析失败、profile 里所有 pnpm 操作被拒；归并器顺手修历史坏行，卸载失败文案带上 pnpm 报错首行与日志路径。
+  - 强制更新的豁免改为**到期自动清理**（`schedule-exempt-cleanup` + `dropExemptVersion` + `profile/ui-tweaks/exempt-pending.json` 落盘重排）。
+  - 更新面板列表滚动条改**浮层拇指**（隐藏原生条、可拖动、不占行内宽）。
+  - 改动卡动作补位：`/api/changes.open` 404 时由 host 复用官方 `dsh-native-command` 完成打开 / 显示位置 / 用指定应用打开；应用列表只列真实应用（主按钮＝第一个应用）。
 - [ ] `shell` 模式重启不留日志（`ui-tweaks-restart.log` 只有 `relaunch` 分支写），要硬证据就在 `performRestart` 退出前追加一行；「点按钮 → 宿主退出」目前只有 `crash-*-host.log` 作间接证据。
 - [ ] 窗口记忆「零闪现」只能靠常驻 watcher 进程（代价：常驻 + 卸载残留），**待与用户确认**。
 - [ ] cooling 预检更准：现在只扫 importers 直连依赖，传递依赖靠反应式报错兜底；要覆盖全量 lockfile 得有更狠的缓存/批量策略。
