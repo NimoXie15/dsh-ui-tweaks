@@ -146,6 +146,13 @@
 - **小字规则**：无公告 → 卡内底部一行 11px 可见小字 + `title`；编码视图关 → 只走 `title`，不破坏与官方的一致性。
 - **hover 预览与官方对齐**：行号单列（删除行给旧行号、新增行给新行号、上下文行给新行号）、改动行淡底色（绿/红 16%）、左侧 2px 色条、`white-space: pre` 不换行（长行横向滚动）、hunk 之间留 6px 分隔。
 
+## 改动审查默认单栏（模块 8，0.2.3 起）
+
+- **官方现状**：侧边栏 ReviewTab 的本地 store 在**新标签**时写死 `split: true`（`deliverables/lib/client.js` 的 `createReviewStore().navigated` → `{ split: true, wrap: false }`），且只存在本会话内存里，没有配置项/投影可改。
+- **做法**：`installReviewUnified()` 用 `MutationObserver` 盯 `[data-changes-review]` 的新挂载；若其中的 `[data-review-view]` 仍是 `split`，就点一次它自己的切换按钮 `[data-review-tool="split"]`，把该标签切成 `unified`。用 `data-dshuiw-unified` 标记防重复、`150ms × 4` 重试应付「外层先挂、header 后渲染」。
+- **边界**：只处理新出现的标签，不劫持用户已手动切换过的旧标签；官方若改选择器会静默失效（不会报错）。开关：`localStorage["dshuiw.reviewUnified"] = "0"`。
+- **为什么不用官方 API**：store 是 deliverables 私有的，`openResource` 只接受 `{index}` 参数；DOM 按钮带 `data-review-tool` 稳定属性，是唯一不碰官方包的路径。
+
 ## 窗口记忆（模块 6，仅 host 半区）
 
 官方桌面客户端主窗口写死 1280×820 居中、主进程无窗口状态持久化（app.asar 里 `createWindow` 无 placement）；渲染层 `contextIsolation+sandbox`、`dshDesktop` 桥只给 `dsh-app://app` 主框架。故走**进程外**：host 半区 spawn 隐藏 PowerShell helper（`lib/window-helper.ps1`），Win32 互操作来自 `lib/window-helper.cs` 预编译的 `window-helper.dll`（装到 profile 的 `ui-tweaks/`）。
@@ -236,6 +243,7 @@
   - 更新面板列表滚动条改**浮层拇指**（隐藏原生条、可拖动、不占行内宽）。
   - 改动卡动作补位：`/api/changes.open` 404 时由 host 复用官方 `dsh-native-command` 完成打开 / 显示位置 / 用指定应用打开；应用列表只列真实应用（主按钮＝第一个应用）。
 - [x] 0.2.3（2026-10-26）：**自更新不再走「卸载 → 安装」**（真机上会把自己卸掉、第二步装不回来，用户看到「卸完就结束了」）。面板把本插件那行标「手动更新」，点开给 CLI 命令 + 复制按钮；`enqueue`/`startOne` 对 `SELF_NAME` 短路，「全部更新」计数与执行都排除自己；host 的 `/local-plugins` 新增 `selfUpdate`（profile / 是否桌面端 / 客户端自带 CLI 路径，`selfUpdateInfo()` 可传 override 做单测）。验证：`node --check`、静态断言 29/29（守卫顺序、UI 分支、命令拼装、复制兜底）、host 单测 9/9（web / 桌面有 CLI / 桌面无 CLI / 找不到 profile；脚本在 `.dsh-tmp/`，未入库）。**待真机**：装一个旧版本（如 0.2.2）再打开面板，点「手动更新」应只展开命令、不触发卸载。
+  - 同版新增**模块 8：改动审查默认单栏**（官方新标签写死 `split:true`，用 DOM 切换按钮改成 unified；见上文「改动审查默认单栏」）。
 - [ ] `shell` 模式重启不留日志（`ui-tweaks-restart.log` 只有 `relaunch` 分支写），要硬证据就在 `performRestart` 退出前追加一行；「点按钮 → 宿主退出」目前只有 `crash-*-host.log` 作间接证据。
 - [ ] 窗口记忆「零闪现」只能靠常驻 watcher 进程（代价：常驻 + 卸载残留），**待与用户确认**。
 - [ ] cooling 预检更准：现在只扫 importers 直连依赖，传递依赖靠反应式报错兜底；要覆盖全量 lockfile 得有更狠的缓存/批量策略。
