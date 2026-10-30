@@ -256,5 +256,7 @@
   git add -A && git commit -m "..." && git push
   npm publish
   ```
-- **Token**：npm 2025-11 起只支持 granular token，要有 **Bypass 2FA**：npmjs.com → Access Tokens → Generate New Token → Packages 选 **All Packages + Read and Write (publish and stage)**、Organizations 选 **No access**、勾 **Bypass two-factor authentication**；再 `npm config set //registry.npmjs.org/:_authToken=npm_xxx`（写用户级 `.npmrc`——`.gitignore` 已排除 `.npmrc` 与 `*.tgz`）。
+- **Token（当前做法，2026-10 实测）**：账号**不开 2FA**，只建 granular token 发布 —— npmjs.com → Access Tokens → Generate New Token → Packages 选 **All Packages + Read and Write (publish and stage)**、Organizations 选 **No access**（未开 2FA 时没有 Bypass 勾选项）；然后 `npm config set //registry.npmjs.org/:_authToken=npm_xxx`（写用户级 `.npmrc`——`.gitignore` 已排除 `.npmrc` 与 `*.tgz`）。npm 2025-11 起只支持 granular token；token 失效的表现是 `npm whoami` 直接 `E401`，重新生成覆盖即可。
+- **要开 2FA 的话只能配 passkey**（2026-10 实测）：npm 2025-09-29 起对新配置关闭 TOTP/身份验证器应用（官方回复 working as intended，见 community #182325），网页上没有入口、`npm profile enable-2fa` 也不给配——网上老截图是存量配置。passkey 在 Windows 弹窗里选「此设备」（Windows Hello PIN）即可；「扫码存到手机」需要手机端有通行密钥提供方，国行安卓没有 Google 服务，必然报「设备无法连接」。注册后务必抄下 recovery codes。
+- **bypass-2FA token 正在被 npm 限制**：会提示 "tokens that bypass 2FA are being restricted for account changes and direct publishing"；不开 2FA 的普通 token 不受这条影响，但长期要盯 npm changelog，必要时迁到 trusted publishing（OIDC）。
 - 包是 scoped（`@nimoxie/dsh-ui-tweaks`），`publishConfig.access: "public"` 已在 package.json。
