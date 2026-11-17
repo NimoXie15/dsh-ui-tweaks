@@ -90,6 +90,7 @@
 - **重新检查必须回填在飞状态**（0.1.4 修）：`checkNow` 重建 `rows` 会把「更新中/等待更新」抹成「有新版本」而 `busyName`/`queue` 还在，点那行撞上 `enqueue` 的 `name === busyName` 保护而**静默无反应**（「重新检查后无法更新」的成因）。修法：重建后立刻 `reconcileInstallStates()` 盖回 busy/queuing，这两种行不参与比对。
 - **看门狗按「进度」而不是「总时长」判活**（0.2.2 修）：旧实现固定 240 秒、从调用开始计时；真机一次重链 44 个包的卸载跑了 **5 分 08 秒**就被误判超时。更糟的是判超时后立刻 `pump()` 下一项、旧请求还在跑，两条 pnpm 叠在 profile 锁上——表现就是「全都卡住」。现在：`ctx.remote.$on("plugin-manager/install-log|install-state|changed")` 当心跳（拿不到就退回纯计时）；无输出 90s 只在行内提示「仍在运行」；单项 15 分钟才判超时，判超时后仍等底层链收尾（最多再 5 分钟）才放行队列。放行闸是 `releaseBusy()`：`busyChainDone`（底层链收尾）+ `busyFinished`（终态已判定）同时成立，才清 busy 并 `pump()`。
 - **unknown 终态必须复查并回滚**（0.2.2 加）：判超时/结果未知且本次**中途卸载过**时，旧实现只写一句「请确认」，而后续「装回」那一步的结果会因为 `settled` 被丢弃 —— 真机上 `@linxin666/dsh-session-archive` 就是这样被卸掉后没装回来。现在 `recoverAfterUnknown()` 主动 `listBundles()` 复查：不在清单里就用 `busyBefore` 自动装回，并把结果写进行内文案。
+- **更新首选原地覆盖，两步法只是退路；两步之前先验来源**（0.2.4 加）：`installBundle("<名>@<版本>")` 在**没有 HMR**的运行时是原地替换、不碰卸载；只有 HMR 运行时把它拒成 `already-installed`（判据是"包名已在 profile 依赖里"，与版本无关）才退回「卸载 → 等清单消失 → 装回」。为了让退路不把插件弄丢，卸载前先调 host `POST /preflight-source`：查 `registry.npmjs.org` 上目标版本是否存在、`dist.tarball` 能否取到首字节（`Range: bytes=0-0`），失败就**不卸载**。失败落 `state:"fail"`（标签「更新失败」），行内 why 是一句人话（如「没更新：安装包下载不到，插件保持原样（未卸载）」），技术原因放 `tech` 字段、只拼进悬停 `title`（如「安装包下载失败（HTTP 404）」）—— 代码是给排查用的，不摆在正文里。错误码：`registry-<status>` / `version-missing` / `tarball-<status>` / `tarball-missing` / `registry-too-large` / `network` / `name-required`。host 路由不存在（老 host 没重启）按「无法预检」放行，不阻断正常更新。
 - **registry / host 请求必须有超时**（0.2.2 加）：`fetchLatest`（`/latest`）12 秒、host 来源名单 8 秒。比对是串行的，一个挂起的请求会让后面所有包永远停在「比对中 …」；`fetchLocalNames` 更靠前 —— 它不回调，整条比对链根本不会开始。
 - **清单里「装了但读不到」的行要带原因**（0.2.2 加）：`listBundles` 对读不到 `package.json` 的包仍会返回一行（带 `error`、没有 `version`），面板原来只显示「无法比对」。现在把 `error.code` / `availability: "missing"` 写进 `why`，悬停就能看出是文件缺失还是清单坏了。
 - **总看门狗只是兜底**（0.1.4 起，0.2.2 重写）：正常路径一次 `installBundle` 定案，不必等它；它只兜 fetch/网络这类异常分支。
@@ -133,6 +134,8 @@
 - **turn 从哪来**：Definition 发布的状态只有 `{seq, files}`，轮号在 slot props 的 `owner.turn.turn`（TurnLocation）。官方 validator 要求 `turn` 是 ≥1 整数，取不到就**不拦**——宁可不补，也不能发非法形状。
 - **形状**：`summary = {turn, files:[{path,display,added,deleted}], total, added, deleted}`；`diff = {kind:"text", path, display, before, after, coarse, hunks:[{oldStart,oldLines,newStart,newLines,lines}]}`，hunk 按 3 行上下文切、行号 1 基、每行带 `+`/`-`/空格 前缀、单文件上限 2000 行。
 - **口径差异（有意为之）**：官方是回合首末**净变化**，旧自画卡是**分段累加**（链断时按段计），同一轮数字会不同（实测 +16 −13 vs +2 −12）。要官方外观就走官方口径。
+- **活会话绝不抢答（0.2.4 修）**：summary/diff 先走官方原路、**只有 404 才用片段重建**。官方口径是整文件快照对比（`dsh-workspace-changes` 的 `compareText(before, after)`），行号是文件绝对行号；片段数据只有 `{path, oldText, newText}`（`dsh-tool-fs` 的 `computeHunkDiffs`，逐 hunk 输出，**不带偏移**）。坐标登记仍然留在卡片**渲染期**（`registerChangesCoordinates`）——登记本身不构成劫持，因为适配层已经「官方优先」；但反过来，如果只在自画卡时才登记，官方卡画过的回合在会话释放后就没有兜底数据，Review 会显示「这轮改动的内容已不可用」。
+- **片段补位要尽量对齐真实行号（0.2.4 加）**：补位时先 `POST /api/ui-tweaks/read-text` 读当前文件，用「最后一段新片段的首行」在文件里反查落点（多命中按后续行匹配度打分，最多扫 200 个候选），得到 `newStart`；旧文件回不来，`oldStart = newStart − 前面各段的行差累计` 作估计。hunk 起点整体平移（保留段内相对偏移）。读不到文件/匹配不上就退回片段内行号，日志里写「片段级，行号从 1 起」；对齐成功写「已按文件内容对齐行号」。
 - **display**：按官方规范取相对 cwd 的路径；**家目录 `~` 归一化暂缺**（客户端拿不到 home），仓库外文件退化为绝对路径，只影响观感、不影响校验。
 - **验证**：离线 harness `.dsh-tmp/check-adapter.mjs`（临时脚本，未入库）—— 真 `client.js` + 假 ModuleLoader/React/slots/sessions + **官方 4 个 validator**，16 项（summary/diff 形状、净变化计数、hunk 行号与上下文、index 越界透传、跨会话/跨 seq/无关路由不拦、卸载复原）；真机已在旧会话 `<旧会话 id>` turn 57（seq 3156）验证：官方卡与右侧 Review 均正常，旧卡自动让位。
 
@@ -238,6 +241,7 @@
 - [x] 0.2.2（2026-10-22）：修「全部更新全都卡住」—— 看门狗按进度判活、`unknown` 后复查并装回、fetch/host 请求全超时、`yamlScalar()` 修豁免表写法、豁免到期清理、面板浮层滚动条、改动卡打开方式补位。真机曾因中断的 pnpm 操作掏空 44 个包、单次重链跑了 5 分 08 秒。
 - [x] 0.2.3（2026-10-26）：自更新不再走「卸载 → 安装」（标「手动更新」+ CLI 命令，`enqueue`/`startOne` 对 SELF 短路）；新增模块 8「改动审查默认单栏」。离线 29/29 + 15/15 + host 9/9。
   - 同版收尾：`hostJson` / `fetchWithTimeout` 收成共用实现（删掉 4 处 AbortController 样板）；定时器 / 观察器 / `matchMedia` 包装统一走 `onDispose()`；文档精简，本机路径与会话 id 换成占位符。
+- [x] 0.2.4（2026-11-17）：修「改动审查行号不对」—— 适配层改成「先请官方、404 才补位」；坐标登记仍留在渲染期（否则官方卡画过的回合在释放后没有兜底数据，Review 显示「内容已不可用」）。补位 diff 新增行号对齐（host `read-text` 反查片段落点，10 项离线单测通过）。另加更新前来源预检（`preflight-source`，问 pnpm 实际使用的 registry）：两步法卸载前先验目标版本可下载，失败不卸载、落「更新失败」+ 悬停看技术原因。离线语法检查通过，真机待验。
 - [ ] `shell` 模式重启不留日志（`ui-tweaks-restart.log` 只有 `relaunch` 分支写），要硬证据就在 `performRestart` 退出前追加一行；「点按钮 → 宿主退出」目前只有 `crash-*-host.log` 作间接证据。
 - [ ] 窗口记忆「零闪现」只能靠常驻 watcher 进程（代价：常驻 + 卸载残留），**待与用户确认**。
 - [ ] cooling 预检更准：现在只扫 importers 直连依赖，传递依赖靠反应式报错兜底；要覆盖全量 lockfile 得有更狠的缓存/批量策略。
