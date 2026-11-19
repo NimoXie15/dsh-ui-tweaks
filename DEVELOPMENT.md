@@ -224,7 +224,7 @@
 
 ## 从 dsh-web-shell 迁移的功能
 
-对话区左侧滚动条与宽表格修复原是 dsh-web-shell 的 CDP 注入脚本，已整体迁入本插件（client bundle 自由 JS），dsh-web-shell 自身删了对应代码与 `leftScrollbar` / `tableWidthFix` 配置。细节见 `lib/client.js` 各模块注释（宿主挂 body、composerSeat 裁剪 −4px、拖动三层防御、零位移 wheel 解阅读锚点、出血布局三件套），只记一条：
+对话区左侧滚动条与宽表格修复原是 dsh-web-shell 的 CDP 注入脚本，已整体迁入本插件（client bundle 自由 JS），dsh-web-shell 自身删了对应代码与 `leftScrollbar` / `tableWidthFix` 配置。细节见 `lib/client.js` 各模块注释（宿主挂 body、composerSeat 裁剪 −4px、拖动三层防御、出血布局三件套），只记一条：
 
 - **判断 dsh 是否已修宽表格**（决定何时删模块 1）：打开含 ≥4 列表格的会话，控制台跑 `getComputedStyle(document.querySelector('[class*="tableScroll"]')).maxWidth`——不再是 `100%` 说明官方已修，删掉 `installTableWidthFix` 的 guard 行即完全回滚。
 
@@ -245,6 +245,7 @@
   - 同版收尾：`hostJson` / `fetchWithTimeout` 收成共用实现（删掉 4 处 AbortController 样板）；定时器 / 观察器 / `matchMedia` 包装统一走 `onDispose()`；文档精简，本机路径与会话 id 换成占位符。
 - [x] 0.2.4（2026-11-17）：修「改动审查行号不对」—— 适配层改成「先请官方、404 才补位」；坐标登记仍留在渲染期（否则官方卡画过的回合在释放后没有兜底数据，Review 显示「内容已不可用」）。补位 diff 新增行号对齐（host `read-text` 反查片段落点，10 项离线单测通过）。另加更新前来源预检（`preflight-source`，问 pnpm 实际使用的 registry）：两步法卸载前先验目标版本可下载，失败不卸载、落「更新失败」+ 悬停看技术原因。离线语法检查通过，真机待验。
 - [x] 0.2.5（2026-11-19）：补位 diff 改为**逐段成 hunk**（同一文件多段改动不再串成一次替换，修真机「删二维码代码 / 加 import 配成一对」）；锚点改成「连续相同的最长非空区间 ≥3 行」，空行不再把落点带到第 1 行；任一段没锚定就在标题标「（片段内行号）」。10 项离线单测全过（含空行首行、非空不足 3 行、多段各自命中、部分命中）。
+  - 同版修对话区滚动条的偶发拖不动：宿主 `pointer-events:none`（只有 track 收事件，隐层不再吃掉右缘点击）、document 捕获段补 pointerup/pointercancel 兜底（捕获丢失或宿主重建时收尾）、调宽条不可见时整块隐藏而不是摆到 `left:-14`、thumb 位置改按可滚动行程归一化（28px 下限不再导致拖到底差一截）、拖动态补刷新 `trRect`、`ResizeObserver` 在卸载时 `disconnect`。
 - [ ] `shell` 模式重启不留日志（`ui-tweaks-restart.log` 只有 `relaunch` 分支写），要硬证据就在 `performRestart` 退出前追加一行；「点按钮 → 宿主退出」目前只有 `crash-*-host.log` 作间接证据。
 - [ ] 窗口记忆「零闪现」只能靠常驻 watcher 进程（代价：常驻 + 卸载残留），**待与用户确认**。
 - [ ] cooling 预检更准：现在只扫 importers 直连依赖，传递依赖靠反应式报错兜底；要覆盖全量 lockfile 得有更狠的缓存/批量策略。
